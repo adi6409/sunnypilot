@@ -85,17 +85,6 @@ class CarState(CarStateBase):
     # Store info from servo message PSCM1
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
 
-    if self.frame % 50 == 0:
-      print({
-        "ACCStatus": cam_cp.vl["FSM0"]["ACCStatus"],
-        "available": ret.cruiseState.available,
-        "enabled": ret.cruiseState.enabled,
-        "standstill": ret.cruiseState.standstill,
-        "vEgo": ret.vEgo,
-        "brakePressed": ret.brakePressed,
-        "gasPressed": ret.gasPressed,
-        "steerFaultTemporary": ret.steerFaultTemporary,
-      })
 
     self.frame += 1
     return ret, ret_sp
