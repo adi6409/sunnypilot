@@ -84,7 +84,12 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
   return packer.make_can_msg("FSM3", 0, values)
 
 
-def create_radar(packer, stock_fsm1):
+def create_radar(packer, stock_fsm1, long_active):
+  # Pass through stock FSM1 bytes. When OP is actively commanding long we
+  # spoof ACC_Distance to 255 (no lead) so OP's planner isn't reacting to
+  # stock radar targets. When OP is NOT active we pass the stock value
+  # through untouched so the car's CVM / collision avoidance never sees a
+  # gap and doesn't fault out.
   values = {s: stock_fsm1[s] for s in (
     "Byte_1",
     "Byte_2",
@@ -93,7 +98,5 @@ def create_radar(packer, stock_fsm1):
     "Byte_5",
     "Byte_6",
   )}
-  values |= {
-    "ACC_Distance": 255,
-  }
+  values["ACC_Distance"] = 255 if long_active else stock_fsm1["ACC_Distance"]
   return packer.make_can_msg("FSM1", 0, values)

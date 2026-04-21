@@ -95,10 +95,22 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Longitudinal control: require controls_allowed + range check.
+  // Longitudinal control: range check only.
+  //
+  // We cannot gate on controls_allowed here because the CarController has to
+  // continuously emit FSM3 on MAIN bus even when OP is disengaged. The panda's
+  // relay opens on safety-mode activation and blocks stock cam->main FSM3
+  // forwarding; if we don't replace it, the car's ADAS times out within
+  // seconds. The CarController passes through the stock accel value when
+  // !longActive, so the actual wire values during disengagement are whatever
+  // stock's own FSM was computing — already within the car's acceptable range.
+  //
+  // The range check remains: OP can never command outside [-4.0, +2.0] m/s^2
+  // regardless of engagement state. Combined with the CarController's clip
+  // to the same range, this is the authoritative safety bound.
   if (msg->addr == VOLVO_EUCD_FSM3) {
     int raw_accel = (int)GET_BYTES(msg, 1, 1) - 126;
-    if (!controls_allowed || longitudinal_accel_checks(raw_accel, VOLVO_LONG_LIMITS)) {
+    if (longitudinal_accel_checks(raw_accel, VOLVO_LONG_LIMITS)) {
       violation = true;
     }
   }

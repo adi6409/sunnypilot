@@ -86,14 +86,24 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
-    # Longitudinal control — only emit when OP is actively controlling long.
-    # Gating on CC.longActive avoids race with stock ACC during engagement/disengagement
-    # and prevents OP's frame-0 accel from fighting stock FSM3 while the panda relay is
-    # still closed.
-    if self.CP.openpilotLongitudinalControl and CC.longActive:
-      accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+    # Longitudinal control — ALWAYS emit FSM1/FSM3 on MAIN bus when long is
+    # enabled. Our panda safety opens the relay on boot (safety_mode != silent),
+    # which blocks stock cam→main FSM1/FSM3 forwarding. If we don't replace
+    # those messages, the car's ADAS (CVM, FSM, driver-attention) times out
+    # within a few seconds and throws "Collision Avoidance Unavailable" /
+    # "Adaptive Cruise Control Unavailable" and locks out until ignition cycle.
+    #
+    # Strategy: always passthrough stock bytes. Only OVERRIDE the accel value
+    # (and ACC_Distance for radar spoof) when OP is actually longActive.
+    # Otherwise use stock's own accel so we behave as a transparent relay.
+    if self.CP.openpilotLongitudinalControl:
+      if CC.longActive:
+        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      else:
+        # Passthrough stock's current ACC_AccelerationRequest (already in m/s^2 per DBC).
+        accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, CC.longActive))
 
     # SNG
     # wait 100 cycles since last resume sent
@@ -106,7 +116,8 @@ class CarController(CarControllerBase):
         # send 25 messages at a time to increases the likelihood of resume being accepted
         can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * 25)
         if self.CP.openpilotLongitudinalControl:
-          can_sends.extend([volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check)] * 25)
+          # Already sending FSM3 every frame above; SNG just needs the resume button blast.
+          pass
         else:
           can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
         self.sng_count += 1
