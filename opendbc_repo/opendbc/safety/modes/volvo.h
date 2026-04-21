@@ -9,8 +9,9 @@
 #define VOLVO_EUCD_Brake_Info    0x20a  // RX, driver brake pressed
 #define VOLVO_EUCD_CCButtons     0x127  // TX by OP, CC buttons
 #define VOLVO_EUCD_PSCM1         0x246  // TX by OP to camera, PSCM state
+#define VOLVO_EUCD_FSM1          0x260  // TX by OP, ACC radar/distance message (oplong)
 #define VOLVO_EUCD_FSM2          0x262  // TX by OP, LKA command
-#define VOLVO_EUCD_FSM3          0x270  // TX by OP, ACC status
+#define VOLVO_EUCD_FSM3          0x270  // TX by OP, ACC accel request + status
 
 // CAN bus numbers.
 #define VOLVO_MAIN_BUS 0U
@@ -20,8 +21,9 @@
 static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
     {VOLVO_EUCD_CCButtons, VOLVO_MAIN_BUS, 8, .check_relay = false},
     {VOLVO_EUCD_PSCM1,     VOLVO_CAM_BUS,  8, .check_relay = true},
+    {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = true},
     {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false}
+    {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = true},
   };
 
   // TODO: add counters
@@ -33,9 +35,6 @@ static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
   };
 
 static void volvo_rx_hook(const CANPacket_t *msg) {
-  //int bus = GET_BUS(to_push);
-  //int addr = GET_ADDR(to_push);
-
   if (msg->bus == VOLVO_MAIN_BUS) {
     if (msg->addr == VOLVO_EUCD_VehicleSpeed1) {
       // Signal: VehicleSpeed
@@ -54,36 +53,27 @@ static void volvo_rx_hook(const CANPacket_t *msg) {
       // Signal: BrakePedal
       brake_pressed = ((GET_BYTES(msg, 2, 1) & 0x0CU) >> 2U) == 2U;
     }
-
-    // If steering controls messages are received on the destination bus, it's an indication
-    // that the relay might be malfunctioning.
-    // generic_rx_checks(volvo_lkas_msg_check(addr));
   } else if (msg->bus == VOLVO_CAM_BUS) {
     if (msg->addr == VOLVO_EUCD_FSM0) {
-      // Signal: ACCStatus
-      unsigned int cruise_state = GET_BYTES(msg, 2, 1) & 0x07U;
-      bool cruise_engaged = (cruise_state == 6U) || (cruise_state == 7U);
+      // Signal: ACC_Enabled (bit 2 of byte 2, from ACCStatus == 6 || 7)
+      bool cruise_engaged = (GET_BYTES(msg, 2, 1) & 0x04U) != 0U;
       pcm_cruise_check(cruise_engaged);
     }
   }
 }
 
 static bool volvo_tx_hook(const CANPacket_t *msg) {
-  //const AngleSteeringLimits VOLVO_STEERING_LIMITS = {
-  //  .max_angle = 60000,  // 600 deg, reasonable limit
-  //  .angle_deg_to_can = 100,
-  //  .angle_rate_up_lookup = {
-  //    {0., 5., 15.},
-  //    {5., .8, .15}
-  //  },
-  //  .angle_rate_down_lookup = {
-  //    {0., 5., 15.},
-  //    {5., 3.5, .4}
-  //  },
-  //};
+  // Longitudinal safety limits — raw byte 1 of FSM3 is ACC_AccelerationRequest
+  // encoded as (0.04, -5.04). Safety-side we check raw_accel = byte1 - 126.
+  // +50 raw =>  +2.0 m/s^2 max accel
+  // -100 raw => -4.0 m/s^2 max decel
+  const LongitudinalLimits VOLVO_LONG_LIMITS = {
+    .max_accel = 50,
+    .min_accel = -100,
+    .inactive_accel = 0,
+  };
 
   bool tx = true;
-  //int addr = GET_ADDR(to_send);
   bool violation = false;
 
   // Safety check for CC button signals.
@@ -105,6 +95,14 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
     }
   }
 
+  // Longitudinal control: require controls_allowed + range check.
+  if (msg->addr == VOLVO_EUCD_FSM3) {
+    int raw_accel = (int)GET_BYTES(msg, 1, 1) - 126;
+    if (!controls_allowed || longitudinal_accel_checks(raw_accel, VOLVO_LONG_LIMITS)) {
+      violation = true;
+    }
+  }
+
   if (violation) {
     tx = false;
   }
@@ -113,8 +111,7 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
 }
 
 static safety_config volvo_init(uint16_t param) {
-  
-  UNUSED(param);
+  (void)param;
 
   return BUILD_SAFETY_CFG(volvo_eucd_rx_checks, VOLVO_EUCD_TX_MSGS);
 }

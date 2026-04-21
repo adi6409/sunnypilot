@@ -1,3 +1,4 @@
+import copy
 from cereal import car
 from opendbc.can import CANParser
 from opendbc.car.common.conversions import Conversions as CV
@@ -44,8 +45,8 @@ class CarState(CarStateBase):
 
     # cruise state
     ret.cruiseState.speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
-    ret.cruiseState.available = cam_cp.vl["FSM0"]["ACCStatus"] != 0
-    ret.cruiseState.enabled = cam_cp.vl["FSM0"]["ACCStatus"] in (6, 7)
+    ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
+    ret.cruiseState.enabled = bool(cam_cp.vl["FSM0"]["ACC_Enabled"])
     ret.cruiseState.standstill = False
     ret.cruiseState.nonAdaptive = False
     ret.accFaulted = False
@@ -85,6 +86,10 @@ class CarState(CarStateBase):
     # Store info from servo message PSCM1
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
 
+    # Messages forwarded for oplong and radar spoofing
+    self.stock_FSM1 = copy.copy(cam_cp.vl["FSM1"])
+    self.stock_FSM3 = copy.copy(cam_cp.vl["FSM3"])
+    self.ACC_Check = cam_cp.vl["FSM3"]["ACC_Check"]
 
     self.frame += 1
     return ret, ret_sp

@@ -66,3 +66,34 @@ def create_lka_msg(packer, apply_steer: float, steer_direction: int):
   values["Checksum"] = calculate_lka_checksum(dat)
 
   return packer.make_can_msg("FSM2", 0, values)
+
+
+def create_longitudinal(packer, stock_fsm3, accel, acc_check):
+  values = {s: stock_fsm3[s] for s in (
+    "Byte_01",
+    "Byte_02",
+    "Byte_2",
+    "Byte_3",
+    "Byte_4",
+    "Byte_5",
+  )}
+  values |= {
+    "ACC_AccelerationRequest": accel,
+    "ACC_Check": acc_check,
+  }
+  return packer.make_can_msg("FSM3", 0, values)
+
+
+def create_radar(packer, stock_fsm1):
+  values = {s: stock_fsm1[s] for s in (
+    "Byte_1",
+    "Byte_2",
+    "Byte_3",
+    "Byte_4",
+    "Byte_5",
+    "Byte_6",
+  )}
+  values |= {
+    "ACC_Distance": 255,
+  }
+  return packer.make_can_msg("FSM1", 0, values)

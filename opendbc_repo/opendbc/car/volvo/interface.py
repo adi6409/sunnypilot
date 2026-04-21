@@ -27,6 +27,12 @@ class CarInterface(CarInterfaceBase):
     ret.steerActuatorDelay = 0.2
     ret.steerLimitTimer = 0.8
 
+    # Longitudinal
+    ret.openpilotLongitudinalControl = True
+    ret.longitudinalActuatorDelay = 0.35
+    ret.vEgoStopping = 0.25
+    ret.stopAccel = 0
+
     return ret
 
   @staticmethod

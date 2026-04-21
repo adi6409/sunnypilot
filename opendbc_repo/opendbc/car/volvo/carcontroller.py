@@ -1,3 +1,4 @@
+import numpy as np
 from opendbc.can import CANPacker
 from openpilot.common.realtime import DT_CTRL
 from opendbc.car import Bus, structs
@@ -31,6 +32,7 @@ class CarController(CarControllerBase):
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
+    accel = 0.0  # always defined so SNG block never NameErrors
 
     actuators = CC.actuators
     pcm_cancel_cmd = CC.cruiseControl.cancel
@@ -84,6 +86,15 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
+    # Longitudinal control — only emit when OP is actively controlling long.
+    # Gating on CC.longActive avoids race with stock ACC during engagement/disengagement
+    # and prevents OP's frame-0 accel from fighting stock FSM3 while the panda relay is
+    # still closed.
+    if self.CP.openpilotLongitudinalControl and CC.longActive:
+      accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1))
+
     # SNG
     # wait 100 cycles since last resume sent
     if (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
@@ -94,7 +105,10 @@ class CarController(CarControllerBase):
       if CS.out.cruiseState.enabled and CS.out.cruiseState.standstill and CS.out.vEgo < 0.01 and self.waiting and CS.acc_distance > self.distance:
         # send 25 messages at a time to increases the likelihood of resume being accepted
         can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * 25)
-        can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
+        if self.CP.openpilotLongitudinalControl:
+          can_sends.extend([volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check)] * 25)
+        else:
+          can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
         self.sng_count += 1
       # disable sending resume after 5 cycles sent or if no more in standstill
       if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
