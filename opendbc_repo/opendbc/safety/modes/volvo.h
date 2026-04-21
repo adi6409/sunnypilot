@@ -20,10 +20,17 @@
 
 static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
     {VOLVO_EUCD_CCButtons, VOLVO_MAIN_BUS, 8, .check_relay = false},
-    {VOLVO_EUCD_PSCM1,     VOLVO_CAM_BUS,  8, .check_relay = true},
-    {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},
-    {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = true},
+    {VOLVO_EUCD_PSCM1,     VOLVO_CAM_BUS,  8, .check_relay = true},   // OP replaces stock steering servo state
+    {VOLVO_EUCD_FSM2,      VOLVO_MAIN_BUS, 8, .check_relay = true},   // OP replaces stock LKA command
+    // FSM1 / FSM3: DO NOT block forwarding. Stock cam FSM1/FSM3 carry a
+    // 5-frame rolling counter pattern the car's ECM validates; intercepting
+    // and replaying with passthrough delay causes the ECM to fault out after
+    // ~30s (observed in drive 27 seg 0). Instead we allow stock to flow
+    // cam->main untouched, and OP overlays its own FSM3 only when long-active.
+    // Car's ECM gets both on main bus interleaved; OP's later arrival
+    // dominates via last-message-wins.
+    {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},
+    {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false},
   };
 
   // TODO: add counters
@@ -95,22 +102,13 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
     }
   }
 
-  // Longitudinal control: range check only.
-  //
-  // We cannot gate on controls_allowed here because the CarController has to
-  // continuously emit FSM3 on MAIN bus even when OP is disengaged. The panda's
-  // relay opens on safety-mode activation and blocks stock cam->main FSM3
-  // forwarding; if we don't replace it, the car's ADAS times out within
-  // seconds. The CarController passes through the stock accel value when
-  // !longActive, so the actual wire values during disengagement are whatever
-  // stock's own FSM was computing — already within the car's acceptable range.
-  //
-  // The range check remains: OP can never command outside [-4.0, +2.0] m/s^2
-  // regardless of engagement state. Combined with the CarController's clip
-  // to the same range, this is the authoritative safety bound.
+  // Longitudinal control: gate on controls_allowed + range check.
+  // With FSM3 check_relay=false, stock flows cam->main uninterrupted.
+  // OP only TXs FSM3 when actively controlling long (CC.longActive), so
+  // controls_allowed will be true whenever OP's FSM3 reaches this hook.
   if (msg->addr == VOLVO_EUCD_FSM3) {
     int raw_accel = (int)GET_BYTES(msg, 1, 1) - 126;
-    if (longitudinal_accel_checks(raw_accel, VOLVO_LONG_LIMITS)) {
+    if (!controls_allowed || longitudinal_accel_checks(raw_accel, VOLVO_LONG_LIMITS)) {
       violation = true;
     }
   }

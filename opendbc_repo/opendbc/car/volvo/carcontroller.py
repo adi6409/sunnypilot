@@ -86,24 +86,18 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
-    # Longitudinal control — ALWAYS emit FSM1/FSM3 on MAIN bus when long is
-    # enabled. Our panda safety opens the relay on boot (safety_mode != silent),
-    # which blocks stock cam→main FSM1/FSM3 forwarding. If we don't replace
-    # those messages, the car's ADAS (CVM, FSM, driver-attention) times out
-    # within a few seconds and throws "Collision Avoidance Unavailable" /
-    # "Adaptive Cruise Control Unavailable" and locks out until ignition cycle.
+    # Longitudinal control — only TX when OP is actually longActive.
+    # FSM1/FSM3 are now forwarded cam->main by the panda (check_relay=false
+    # in volvo.h safety), so the car always sees stock's FSM messages with
+    # their native 5-frame counter pattern. When OP is controlling, we
+    # overlay our own FSM3 on main bus — the ECM sees stock + OP interleaved
+    # and takes the last-arriving (which is OP's at ~50Hz).
     #
-    # Strategy: always passthrough stock bytes. Only OVERRIDE the accel value
-    # (and ACC_Distance for radar spoof) when OP is actually longActive.
-    # Otherwise use stock's own accel so we behave as a transparent relay.
-    if self.CP.openpilotLongitudinalControl:
-      if CC.longActive:
-        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      else:
-        # Passthrough stock's current ACC_AccelerationRequest (already in m/s^2 per DBC).
-        accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+    # Run at 50Hz (every other frame) to match stock cadence.
+    if self.CP.openpilotLongitudinalControl and CC.longActive and self.frame % 2 == 0:
+      accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, CC.longActive))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
 
     # SNG
     # wait 100 cycles since last resume sent
