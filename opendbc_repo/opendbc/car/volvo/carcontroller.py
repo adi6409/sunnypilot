@@ -162,18 +162,31 @@ class CarController(CarControllerBase):
 
       op_accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
-      # Take-off passthrough: during the ~3s after a SNG resume blast and
-      # while still rolling slowly, use stock's own ACC_AccelerationRequest
-      # value instead of OP's. Stock ACC decides its take-off ramp based on
-      # lead range/closing rate and commanded +1.68 m/s² in drive 3f seg 11
-      # while OP only wanted +1.25; the car fell behind stock's expected
-      # profile and stock cancelled. Mirroring stock's accel during take-off
-      # keeps stock's state machine happy. OP takes back over once cruising.
-      # Only passes through POSITIVE accel — if stock wants to brake we
-      # still use OP's value (stock's brake authority is weak on this car).
+      # Take-off passthrough: after a SNG resume blast, while still rolling
+      # below 5 m/s, defer to stock's ACC_AccelerationRequest when stock
+      # wants MORE positive accel than OP. Stock's take-off ramp was
+      # commanding +0.88 m/s² in drive 0000042 seg 3 while OP only wanted
+      # +0.62; the car lagged stock's expected response profile and stock
+      # cancelled 0.3s into the takeoff. Mirroring stock's value (when
+      # higher) keeps stock's state machine satisfied. OP takes back over
+      # once cruising above 5 m/s.
+      #
+      # Previously we gated on a 3s time window starting from the resume
+      # blast, but that window expired mid-takeoff when the resume hit near
+      # a segment boundary (drive 0000042 seg 2→3). vEgo threshold is a
+      # more reliable trigger.
+      #
+      # Direction guard: only passes stock's POSITIVE accel. If OP wants to
+      # brake during the takeoff (e.g. lead suddenly stopped), OP's value
+      # drives — OP sees the lead via radar, stock's brake authority via
+      # FSM3 is weak on this car anyway.
       takeoff_elapsed = (self.frame - self.takeoff_start_frame) * DT_CTRL
       stock_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
-      if takeoff_elapsed < 3.0 and CS.out.vEgo < 5.0 and stock_accel > 0:
+      # 15s ceiling is a safety belt in case vEgo never crosses 5 (crawl
+      # traffic) — eventually snap back to OP so runaway stock commands
+      # can't persist indefinitely.
+      in_takeoff_window = takeoff_elapsed < 15.0 and CS.out.vEgo < 5.0
+      if in_takeoff_window and stock_accel > op_accel and stock_accel > 0:
         accel = stock_accel
       else:
         accel = op_accel
