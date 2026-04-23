@@ -120,6 +120,26 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
   return tx;
 }
 
+static bool volvo_fwd_hook(int bus_num, int addr) {
+  // Dynamically block stock FSM1/FSM3 cam->main forwarding ONLY when OP is
+  // actively controlling long (controls_allowed=true). This prevents the
+  // stock-vs-OP fight on FSM3 byte[1] we observed in drive 36: stock was
+  // commanding ~+0.3 m/s^2 while OP commanded -1.5 m/s^2, and because both
+  // messages appear on main bus the ECM averaged them → weak braking,
+  // stop-at-light failed, and CVM flickered "Collision Avoidance Service
+  // Required" due to FSM3 sanity-check faults.
+  //
+  // When OP is disengaged we MUST allow forwarding (return false) so the
+  // car's ADAS keeps receiving stock FSM1/FSM3 and doesn't cascade into
+  // "Adaptive Cruise Control Unavailable" errors.
+  if (bus_num == VOLVO_CAM_BUS && controls_allowed) {
+    if (addr == VOLVO_EUCD_FSM1 || addr == VOLVO_EUCD_FSM3) {
+      return true;  // block forwarding; OP's TX on main bus is the only source
+    }
+  }
+  return false;
+}
+
 static safety_config volvo_init(uint16_t param) {
   (void)param;
 
@@ -130,4 +150,5 @@ const safety_hooks volvo_hooks = {
   .init = volvo_init,
   .rx = volvo_rx_hook,
   .tx = volvo_tx_hook,
+  .fwd = volvo_fwd_hook,
 };
