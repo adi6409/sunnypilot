@@ -143,6 +143,7 @@ BO_ 608 FSM1: 8 FSM
  SG_ Byte_4 : 39|8@0+ (1,0) [0|255] "" XXX
  SG_ Byte_5 : 47|8@0+ (1,0) [0|255] "" XXX
  SG_ Byte_6 : 55|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_7 : 63|8@0+ (1,0) [0|255] "" XXX
 
 BO_ 609 fromWhere: 8 XXX
  SG_ COUNTER : 3|4@0+ (1,0) [0|15] "" XXX
@@ -172,6 +173,8 @@ BO_ 624 FSM3: 8 FSM
  SG_ Byte_3 : 31|8@0+ (1,0) [0|255] "" XXX
  SG_ Byte_4 : 39|8@0+ (1,0) [0|255] "" XXX
  SG_ Byte_5 : 47|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_6 : 55|8@0+ (1,0) [0|255] "" XXX
+ SG_ Byte_7 : 63|8@0+ (1,0) [0|255] "" XXX
 
 BO_ 648 BrakePedal: 8 XXX
  SG_ Counter : 0|3@1+ (1,0) [0|6] "" XXX

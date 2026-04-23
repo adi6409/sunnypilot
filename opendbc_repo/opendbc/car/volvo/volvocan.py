@@ -69,13 +69,21 @@ def create_lka_msg(packer, apply_steer: float, steer_direction: int):
 
 
 def create_longitudinal(packer, stock_fsm3, accel, acc_check):
+  # Pass through ALL stock FSM3 bits verbatim so OP's message is byte-identical
+  # to stock's latest except for ACC_AccelerationRequest (byte 1) and ACC_Check.
+  # This preserves the car's 5-frame validation pattern and all counter/mode
+  # bits the ECM checks. Missing any field here will flip a bit in the output
+  # and the ECM may fault after accumulated errors (observed in drive 27 at ~30s).
   values = {s: stock_fsm3[s] for s in (
+    "ACC_Standstill",
     "Byte_01",
     "Byte_02",
     "Byte_2",
     "Byte_3",
     "Byte_4",
     "Byte_5",
+    "Byte_6",
+    "Byte_7",
   )}
   values |= {
     "ACC_AccelerationRequest": accel,
@@ -85,11 +93,9 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
 
 
 def create_radar(packer, stock_fsm1, long_active):
-  # Pass through stock FSM1 bytes. When OP is actively commanding long we
-  # spoof ACC_Distance to 255 (no lead) so OP's planner isn't reacting to
-  # stock radar targets. When OP is NOT active we pass the stock value
-  # through untouched so the car's CVM / collision avoidance never sees a
-  # gap and doesn't fault out.
+  # Pass through ALL stock FSM1 bytes verbatim (same rationale as FSM3). When OP
+  # is actively commanding long we spoof ACC_Distance to 255 (no lead) so OP's
+  # planner isn't reacting to stock radar targets.
   values = {s: stock_fsm1[s] for s in (
     "Byte_1",
     "Byte_2",
@@ -97,6 +103,7 @@ def create_radar(packer, stock_fsm1, long_active):
     "Byte_4",
     "Byte_5",
     "Byte_6",
+    "Byte_7",
   )}
   values["ACC_Distance"] = 255 if long_active else stock_fsm1["ACC_Distance"]
   return packer.make_can_msg("FSM1", 0, values)
