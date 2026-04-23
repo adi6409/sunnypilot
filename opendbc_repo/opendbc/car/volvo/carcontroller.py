@@ -29,6 +29,11 @@ class CarController(CarControllerBase):
     self.distance = 0
     self.waiting = False
     self.sng_count = 0
+    # Frame when the most recent resume-blast cycle started. Used to pass
+    # through stock's FSM3 accel during the take-off window so the ECM's
+    # actual response matches stock ACC's internal expectation — OP's
+    # planner under-commands and stock cancels (drives 3e seg 7, 3f seg 11).
+    self.takeoff_start_frame = -1_000_000
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -86,21 +91,11 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
-    # Longitudinal: only TX when OP is actively controlling (longActive).
-    # Panda's fwd hook now unblocks stock FSM1/FSM3 when !gas_pressed, so
-    # during gas overrides stock flows through naturally and there's no
-    # starvation even though OP isn't TXing. When longActive flickers False
-    # due to gas press, OP withdraws from the bus entirely and the car
-    # sees stock's real-time FSM3 — matching pre-OP-long behavior.
-    if self.CP.openpilotLongitudinalControl and CC.longActive and self.frame % 2 == 0:
-      accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
-
     at_standstill = (CS.out.cruiseState.enabled and CS.out.cruiseState.standstill
                      and CS.out.vEgo < 0.01)
 
-    # SNG
+    # SNG — evaluated BEFORE the long-control TX block so the take-off window
+    # flag set here is visible when we pick OP-vs-stock accel below.
     # wait 100 cycles since last resume sent
     if (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
       if at_standstill and not self.waiting:
@@ -124,11 +119,43 @@ class CarController(CarControllerBase):
           pass
         else:
           can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
+        # Mark the start of the take-off window on the first blast of this
+        # resume cycle so the long block below can defer to stock's accel.
+        if self.sng_count == 0:
+          self.takeoff_start_frame = self.frame
         self.sng_count += 1
       # disable sending resume after 5 cycles sent or if no more in standstill
       if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
         self.waiting = False
         self.last_resume_frame = self.frame
+
+    # Longitudinal: only TX when OP is actively controlling (longActive).
+    # Panda's fwd hook now unblocks stock FSM1/FSM3 when !gas_pressed, so
+    # during gas overrides stock flows through naturally and there's no
+    # starvation even though OP isn't TXing. When longActive flickers False
+    # due to gas press, OP withdraws from the bus entirely and the car
+    # sees stock's real-time FSM3 — matching pre-OP-long behavior.
+    if self.CP.openpilotLongitudinalControl and CC.longActive and self.frame % 2 == 0:
+      op_accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+
+      # Take-off passthrough: during the ~3s after a SNG resume blast and
+      # while still rolling slowly, use stock's own ACC_AccelerationRequest
+      # value instead of OP's. Stock ACC decides its take-off ramp based on
+      # lead range/closing rate and commanded +1.68 m/s² in drive 3f seg 11
+      # while OP only wanted +1.25; the car fell behind stock's expected
+      # profile and stock cancelled. Mirroring stock's accel during take-off
+      # keeps stock's state machine happy. OP takes back over once cruising.
+      # Only passes through POSITIVE accel — if stock wants to brake we
+      # still use OP's value (stock's brake authority is weak on this car).
+      takeoff_elapsed = (self.frame - self.takeoff_start_frame) * DT_CTRL
+      stock_accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+      if takeoff_elapsed < 3.0 and CS.out.vEgo < 5.0 and stock_accel > 0:
+        accel = stock_accel
+      else:
+        accel = op_accel
+
+      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = self.apply_steer_prev
