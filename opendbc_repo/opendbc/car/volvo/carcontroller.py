@@ -35,6 +35,16 @@ class CarController(CarControllerBase):
     # planner under-commands and stock cancels (drives 3e seg 7, 3f seg 11).
     self.takeoff_start_frame = -1_000_000
 
+    # Next wall-clock nanosecond at which FSM3 / FSM1 TX is allowed.
+    # controlsd scheduling jitter means self.frame % 2 == 0 gives us 10–30ms
+    # intervals instead of a clean 20ms (drive 41 seg 4: OP TX stdev 2.6ms
+    # vs stock 0.5ms, with 9.8ms bursts and 30ms gaps). The ECM validates
+    # cadence of stock ACC messages — our bursty pattern looks like a fault
+    # and likely contributes to the self-cancels. Gate TX on wall-clock.
+    self.next_long_tx_nanos = 0
+    # Period between FSM3 TXs (20ms = 50Hz, matching stock).
+    self.LONG_TX_PERIOD_NANOS = 20_000_000
+
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
     accel = 0.0  # always defined so SNG block never NameErrors
@@ -135,7 +145,21 @@ class CarController(CarControllerBase):
     # starvation even though OP isn't TXing. When longActive flickers False
     # due to gas press, OP withdraws from the bus entirely and the car
     # sees stock's real-time FSM3 — matching pre-OP-long behavior.
-    if self.CP.openpilotLongitudinalControl and CC.longActive and self.frame % 2 == 0:
+    #
+    # Rate gating: wall-clock 20ms minimum between TXs, so controlsd jitter
+    # can't produce the 10ms bursts leomonde spotted. If we're late we still
+    # TX once and slide the next-allowed forward by one period (no catch-up
+    # burst).
+    long_tx_due = self.CP.openpilotLongitudinalControl and CC.longActive and now_nanos >= self.next_long_tx_nanos
+    if long_tx_due:
+      # Advance target by exactly one period. If we'd already be past the
+      # advanced time (first TX after longActive gap, or controlsd stalled
+      # for >1 period), resync to avoid a burst of catch-up TXs.
+      next_tx = self.next_long_tx_nanos + self.LONG_TX_PERIOD_NANOS
+      if self.next_long_tx_nanos == 0 or next_tx <= now_nanos:
+        next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
+      self.next_long_tx_nanos = next_tx
+
       op_accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
       # Take-off passthrough: during the ~3s after a SNG resume blast and
@@ -156,6 +180,10 @@ class CarController(CarControllerBase):
 
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
+
+    # FSM3/FSM1 are TX'd together inside long_tx_due so they stay in the
+    # same bus frame and share the 50Hz cadence.
+
 
     new_actuators = actuators.as_builder()
     new_actuators.steeringAngleDeg = self.apply_steer_prev
