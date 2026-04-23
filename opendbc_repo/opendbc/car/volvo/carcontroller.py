@@ -87,28 +87,16 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
-    # Longitudinal: TX continuously whenever stock CC is engaged, regardless
-    # of OP's longActive state. This is the key insight from drive 38's
-    # cancellation analysis — during gas-pedal overrides OP's longActive flips
-    # False (deferring to driver). The panda's fwd hook keeps blocking stock's
-    # cam->main FSM3 because controls_allowed stays True (stock CC engaged).
-    # If we also stop TXing FSM3 during longActive=False, the bus goes silent
-    # on FSM3 for the duration of the gas press, stock ACC detects the
-    # starvation, and cancels hard.
-    #
-    # Fix: always TX FSM3 at 50Hz while cc.enabled. Content:
-    #   - longActive=True: OP's planner accel (our override)
-    #   - longActive=False: stock's own commanded accel passthrough
-    # Byte-for-byte everything else matches stock. From stock ACC's
-    # perspective its commanded values are what's on the bus — no divergence
-    # detection, no cancellation during gas overrides.
-    if self.CP.openpilotLongitudinalControl and CS.out.cruiseState.enabled and self.frame % 2 == 0:
-      if CC.longActive:
-        accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
-      else:
-        accel = float(CS.stock_FSM3["ACC_AccelerationRequest"])
+    # Longitudinal: only TX when OP is actively controlling (longActive).
+    # Panda's fwd hook now unblocks stock FSM1/FSM3 when !gas_pressed, so
+    # during gas overrides stock flows through naturally and there's no
+    # starvation even though OP isn't TXing. When longActive flickers False
+    # due to gas press, OP withdraws from the bus entirely and the car
+    # sees stock's real-time FSM3 — matching pre-OP-long behavior.
+    if self.CP.openpilotLongitudinalControl and CC.longActive and self.frame % 2 == 0:
+      accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, CC.longActive))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
 
     # Track sustained "OP wants to accelerate" signal while at standstill.
     # Used as an alternative resume trigger for no-lead scenarios (empty road

@@ -121,20 +121,28 @@ static bool volvo_tx_hook(const CANPacket_t *msg) {
 }
 
 static bool volvo_fwd_hook(int bus_num, int addr) {
-  // Dynamically block stock FSM1/FSM3 cam->main forwarding ONLY when OP is
-  // actively controlling long (controls_allowed=true). This prevents the
-  // stock-vs-OP fight on FSM3 byte[1] we observed in drive 36: stock was
-  // commanding ~+0.3 m/s^2 while OP commanded -1.5 m/s^2, and because both
-  // messages appear on main bus the ECM averaged them → weak braking,
-  // stop-at-light failed, and CVM flickered "Collision Avoidance Service
-  // Required" due to FSM3 sanity-check faults.
+  // Dynamically block stock FSM1/FSM3 cam->main forwarding only when OP is
+  // actively controlling long AND the driver isn't overriding with gas.
   //
-  // When OP is disengaged we MUST allow forwarding (return false) so the
-  // car's ADAS keeps receiving stock FSM1/FSM3 and doesn't cascade into
-  // "Adaptive Cruise Control Unavailable" errors.
-  if (bus_num == VOLVO_CAM_BUS && controls_allowed) {
+  // Why !gas_pressed: drive 3a showed every sustained gas press (>1s) caused
+  // stock ACC to cancel when the block was gated on controls_allowed alone.
+  // During a gas override OP's longActive goes False, our carcontroller
+  // stops TXing (gated on longActive below); meanwhile we were still
+  // blocking stock's fresh FSM3 from reaching the ECM. Net: FSM3 silent on
+  // main bus for the duration of the gas press. Stock ACC detects its own
+  // commands aren't being reflected and bails.
+  //
+  // Drive 23 confirmed this is OUR bug, not Volvo's native behavior — in
+  // pre-OP-long drives, sustained gas presses (up to 7s) never cancelled
+  // stock CC. Volvo ACC does NOT natively disengage on sustained gas.
+  //
+  // Fix: during gas press, unblock stock cam->main so real stock FSM3
+  // reaches the ECM at 50Hz with correct timing. OP also stops TXing
+  // (longActive=False). Car behaves identically to stock during the
+  // override. When gas released, block and OP TX resume together.
+  if (bus_num == VOLVO_CAM_BUS && controls_allowed && !gas_pressed) {
     if (addr == VOLVO_EUCD_FSM1 || addr == VOLVO_EUCD_FSM3) {
-      return true;  // block forwarding; OP's TX on main bus is the only source
+      return true;
     }
   }
   return false;
