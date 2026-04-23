@@ -93,10 +93,21 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
 
 
 def create_radar(packer, stock_fsm1, long_active):
-  # Pass through ALL stock FSM1 bytes verbatim (same rationale as FSM3). When OP
-  # is actively commanding long we spoof ACC_Distance to 255 (no lead) so OP's
-  # planner isn't reacting to stock radar targets.
+  # Pass through ALL stock FSM1 bytes verbatim, INCLUDING ACC_Distance.
+  #
+  # Rationale for not spoofing ACC_Distance=255:
+  # - OP's planner has radarUnavailable=True → OP doesn't use ACC_Distance anyway
+  # - The car's stock ACC uses ACC_Distance to track lead vehicles and decide
+  #   whether to let the car slow below its 30 km/h engagement floor. When we
+  #   spoofed 255 ("no lead"), stock ACC would disengage when OP commanded
+  #   decel below 30, which via pcmCruise also disengaged OP and left the
+  #   driver to brake manually.
+  # - Letting stock's real ACC_Distance reach the car's ACC means the car
+  #   will follow a real lead vehicle to 0 km/h while OP controls the accel
+  #   byte — enabling experimental-mode stop-at-light when a lead is present.
+  _ = long_active  # kept for signature stability
   values = {s: stock_fsm1[s] for s in (
+    "ACC_Distance",
     "Byte_1",
     "Byte_2",
     "Byte_3",
@@ -105,5 +116,4 @@ def create_radar(packer, stock_fsm1, long_active):
     "Byte_6",
     "Byte_7",
   )}
-  values["ACC_Distance"] = 255 if long_active else stock_fsm1["ACC_Distance"]
   return packer.make_can_msg("FSM1", 0, values)
