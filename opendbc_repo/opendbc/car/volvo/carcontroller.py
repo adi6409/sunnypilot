@@ -45,6 +45,13 @@ class CarController(CarControllerBase):
     # Period between FSM3 TXs (20ms = 50Hz, matching stock).
     self.LONG_TX_PERIOD_NANOS = 20_000_000
 
+    # ACC_Check is the resume-button acknowledgement bit in FSM3. Per
+    # leomonde, it must be forced to 1 specifically during the resume
+    # blast (not copied from stock's FSM3, which sits at 0 almost always).
+    # Count of remaining FSM3 TXs that should carry ACC_Check=1. Set to 25
+    # (~0.5s of 50Hz TX) when SNG fires a resume blast; decrements to 0.
+    self.sng_ack_frames = 0
+
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
     accel = 0.0  # always defined so SNG block never NameErrors
@@ -131,8 +138,12 @@ class CarController(CarControllerBase):
           can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
         # Mark the start of the take-off window on the first blast of this
         # resume cycle so the long block below can defer to stock's accel.
+        # Also arm the ACC_Check=1 acknowledgement window for the next
+        # ~0.5s of FSM3 TXs — the car needs that ack to actually honor the
+        # resume button (per leomonde: "force 1, not copy from FSM").
         if self.sng_count == 0:
           self.takeoff_start_frame = self.frame
+          self.sng_ack_frames = 25
         self.sng_count += 1
       # disable sending resume after 5 cycles sent or if no more in standstill
       if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
@@ -191,7 +202,15 @@ class CarController(CarControllerBase):
       else:
         accel = op_accel
 
-      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
+      # ACC_Check: 1 only during the post-resume acknowledgement window
+      # (set by the SNG block above), else 0. Copying stock's ACC_Check —
+      # as we were doing — left it at 0 almost always, so SNG resumes
+      # worked only when the stock cam-bus value happened to flip in time.
+      acc_check = 1 if self.sng_ack_frames > 0 else 0
+      if self.sng_ack_frames > 0:
+        self.sng_ack_frames -= 1
+
+      can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check))
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
 
     # FSM3/FSM1 are TX'd together inside long_tx_due so they stay in the
