@@ -3,6 +3,7 @@ from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.volvo.carcontroller import CarController
 from opendbc.car.volvo.carstate import CarState
+from opendbc.car.volvo.radar_interface import RadarInterface
 from opendbc.car.volvo.values import CAR, DBC
 
 #ButtonType = car.CarState.ButtonEvent.Type
@@ -11,6 +12,11 @@ from opendbc.car.volvo.values import CAR, DBC
 class CarInterface(CarInterfaceBase):
   CarState = CarState
   CarController = CarController
+  # Without this binding, CarInterfaceBase's default RadarInterfaceBase stub
+  # is used — it returns an empty RadarData every 5 frames regardless of what
+  # the radar sees. Drive 0000003f had the DBC and CarParams wired up
+  # correctly but liveTracks.points stayed 0 because of this missing line.
+  RadarInterface = RadarInterface
 
   @staticmethod
   #def _get_params(ret, candidate: CAR, fingerprint, car_fw, experimental_long, docs):
