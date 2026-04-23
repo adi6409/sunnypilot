@@ -29,6 +29,7 @@ class CarController(CarControllerBase):
     self.distance = 0
     self.waiting = False
     self.sng_count = 0
+    self.op_go_frames = 0  # counts consecutive frames OP wants to accelerate at standstill
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -109,14 +110,32 @@ class CarController(CarControllerBase):
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, CS.ACC_Check))
       can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, CC.longActive))
 
+    # Track sustained "OP wants to accelerate" signal while at standstill.
+    # Used as an alternative resume trigger for no-lead scenarios (empty road
+    # red light → green light). Debounced over ~0.5s to avoid spurious triggers
+    # from momentary planner output transients.
+    at_standstill = (CS.out.cruiseState.enabled and CS.out.cruiseState.standstill
+                     and CS.out.vEgo < 0.01)
+    if at_standstill and self.CP.openpilotLongitudinalControl and CC.longActive and actuators.accel > 0.3:
+      self.op_go_frames += 1
+    else:
+      self.op_go_frames = 0
+
     # SNG
     # wait 100 cycles since last resume sent
     if (self.frame - self.last_resume_frame) * DT_CTRL > 1.00:
-      if CS.out.cruiseState.enabled and CS.out.cruiseState.standstill and CS.out.vEgo < 0.01 and not self.waiting:
+      if at_standstill and not self.waiting:
         self.distance = CS.acc_distance
         self.waiting = True
         self.sng_count = 0
-      if CS.out.cruiseState.enabled and CS.out.cruiseState.standstill and CS.out.vEgo < 0.01 and self.waiting and CS.acc_distance > self.distance:
+
+      # Trigger resume if EITHER the lead moved (original behavior) OR OP's
+      # planner sustained a want-to-go command for >0.5s (new: handles
+      # empty-road green-light resume with no lead to follow).
+      lead_moved = CS.acc_distance > self.distance
+      op_wants_go = self.op_go_frames > 50  # 50 frames × 10ms = ~0.5s
+
+      if at_standstill and self.waiting and (lead_moved or op_wants_go):
         # send 25 messages at a time to increases the likelihood of resume being accepted
         can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * 25)
         if self.CP.openpilotLongitudinalControl:
