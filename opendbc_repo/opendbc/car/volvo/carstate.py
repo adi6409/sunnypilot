@@ -47,7 +47,13 @@ class CarState(CarStateBase):
     ret.cruiseState.speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
     ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
     ret.cruiseState.enabled = bool(cam_cp.vl["FSM0"]["ACC_Enabled"])
-    ret.cruiseState.standstill = False
+    # ACC_Standstill bit = 1 when Volvo's ACC is holding the car at 0 km/h
+    # with brake applied (standstill hold). OP's SNG block reads this to know
+    # when to blast Resume button so stock ACC properly releases and follows
+    # the lead resuming. Without this, stock ACC sees OP commanding accel
+    # from standstill without a Resume press and hard-cancels (observed in
+    # drive 38).
+    ret.cruiseState.standstill = bool(cam_cp.vl["FSM3"]["ACC_Standstill"])
     ret.cruiseState.nonAdaptive = False
     ret.accFaulted = False
     self.acc_distance = cam_cp.vl["FSM1"]["ACC_Distance"]
