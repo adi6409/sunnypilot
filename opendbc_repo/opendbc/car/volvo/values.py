@@ -84,13 +84,23 @@ class CarControllerParams:
 
 class CANBUS:
   pt = 0
-  body = 1
+  body = 1  # aux bus — carries Delphi ESR 2.5 radar (0x500..0x53F) and CEM dynamics
   cam = 2
+
+
+# The Delphi ESR 2.5 "forward-looking radar" sits on the aux bus and streams
+# 64 tracks at 20Hz at 0x500..0x53F. Openpilot reads it directly so the planner
+# sees lead info independently of stock FSM fusion (which only reports a single
+# 1m-resolution ACC_Distance). Prior to this the planner had radarUnavailable=True
+# and lost leads in curves / under-commanded accel at take-off (drive 0000003e).
+RADAR_ESR = "ESR"
 
 @dataclass
 class VolvoEUCDPlatformConfig(PlatformConfig):
-  #dbc_dict: DbcDict = field(default_factory=lambda: dbc_dict('volvo_v60_2015_pt', None))
-  dbc_dict: DbcDict = field(default_factory=lambda: {Bus.pt: 'volvo_v60_2015_pt'})
+  dbc_dict: DbcDict = field(default_factory=lambda: {
+    Bus.pt: 'volvo_v60_2015_pt',
+    Bus.radar: RADAR_ESR,
+  })
 
 
 @dataclass

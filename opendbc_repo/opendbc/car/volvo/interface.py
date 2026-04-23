@@ -1,9 +1,9 @@
 from cereal import car
-from opendbc.car import get_safety_config, structs
+from opendbc.car import Bus, get_safety_config, structs
 from opendbc.car.interfaces import CarInterfaceBase
 from opendbc.car.volvo.carcontroller import CarController
 from opendbc.car.volvo.carstate import CarState
-from opendbc.car.volvo.values import CAR
+from opendbc.car.volvo.values import CAR, DBC
 
 #ButtonType = car.CarState.ButtonEvent.Type
 #EventName = car.CarEvent.EventName
@@ -20,7 +20,10 @@ class CarInterface(CarInterfaceBase):
     ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.volvo)]
     # ret.dashcamOnly = True
 
-    ret.radarUnavailable = True
+    # Read the Delphi ESR 2.5 directly off the aux bus. When Bus.radar is in the
+    # DBC dict, RadarInterface decodes 64 tracks at 20Hz; the planner uses those
+    # instead of relying on stock FSM's fused single-lead ACC_Distance.
+    ret.radarUnavailable = Bus.radar not in DBC[candidate]
 
     ret.steerControlType = car.CarParams.SteerControlType.angle
 
