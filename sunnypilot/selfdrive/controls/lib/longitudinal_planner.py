@@ -71,6 +71,35 @@ class LongitudinalPlannerSP:
 
     self.source = min(targets, key=lambda k: targets[k][0])
     self.output_v_target, self.output_a_target = targets[self.source]
+
+    # Stop-assist: when in experimental mode, the e2e model is sustaining a
+    # brake command (desiredAccel < -0.5), there is no real radar lead, and
+    # we are already below cruising speed, override v_target to 0 so the
+    # MPC plans a full stop and OP commits to hard brake via FSM3.
+    #
+    # Why this is needed (drive 0000004a seg 8): TCPMV3 saw the red-light
+    # context and ramped its desiredAcceleration to -1.4 m/s², but never
+    # set shouldStop=True. The MPC's v_cruise was still at the user's
+    # setpoint (~30 km/h, the Volvo stock-ACC floor), so the plan
+    # plateaued at v=8 m/s instead of stopping. Driver had to brake.
+    #
+    # Brake authority is fine on this platform when OP commits — drive
+    # 0000049 seg 5 showed -2.0 m/s² commanded, -2.0 m/s² actual. The
+    # ACC_Distance spoof in carcontroller prevents stock from cancelling
+    # below its no-lead-low-speed floor while we drive the car to a stop.
+    try:
+      exp_mode = sm['selfdriveState'].experimentalMode
+      model_decel = sm['modelV2'].action.desiredAcceleration
+      lead_present = sm['radarState'].leadOne.status
+      stop_assist_active = (exp_mode and model_decel < -0.5 and
+                            not lead_present and v_ego < 14.0)
+      if stop_assist_active and self.output_v_target > 0.1:
+        self.output_v_target = 0.0
+        self.output_a_target = min(self.output_a_target, model_decel)
+        self.source = LongitudinalPlanSource.cruise
+    except (KeyError, AttributeError):
+      pass
+
     return self.output_v_target, self.output_a_target
 
   def update(self, sm: messaging.SubMaster) -> None:
