@@ -192,7 +192,16 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       if stop_assist_active and not emergency_lead:
         # Controlled stop, no rush — firm but comfortable.
         output_a_target = min(output_a_target, -2.0)
-        self.output_should_stop = True
+        # Suppress shouldStop until we're nearly stopped. Drive 0000050
+        # showed that once shouldStop=True, longcontrol enters "stopping"
+        # state which caps brake at ~-0.5 m/s² (STOP_ACCEL, designed for
+        # the final smooth touch behind a stopped lead) and our -2.0
+        # clamp on output_a_target gets overridden — car couldn't stop
+        # at red lights in time. Stay in PID mode with full brake
+        # authority while we're still rolling, let the natural mpc
+        # shouldStop kick in once v < 2 to do the soft final stop.
+        if v_ego > 2.0:
+          self.output_should_stop = False
       elif emergency_lead:
         # Scale brake by TTC. At TTC=4 use -2.0; at TTC=2 use -3.0;
         # at TTC=1 use -4.0 (clamped at vehicle's safe limit downstream).
