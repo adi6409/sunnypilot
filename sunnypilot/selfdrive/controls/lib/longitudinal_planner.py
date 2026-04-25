@@ -91,12 +91,47 @@ class LongitudinalPlannerSP:
       exp_mode = sm['selfdriveState'].experimentalMode
       model_decel = sm['modelV2'].action.desiredAcceleration
       lead_present = sm['radarState'].leadOne.status
-      stop_assist_active = (exp_mode and model_decel < -0.3 and
-                            not lead_present and v_ego < 14.0)
+      # Drive 0000052 user observation: after braking to a stop at an
+      # intersection, modelV2's planned x-position trajectory truncates
+      # at the stopping line. So model HAS spatial perception of the
+      # intersection; it just doesn't translate that into a strong
+      # desiredAcceleration. Use path_end as an alternative trigger —
+      # if the model's planned position trajectory ends within ~50m
+      # while we're moving, the model expects to stop ahead.
+      try:
+        pos_x = sm['modelV2'].position.x
+        path_end = float(pos_x[-1]) if len(pos_x) else 1000.0
+      except Exception:
+        path_end = 1000.0
+      # path_end < ~3 seconds of forward distance means model is planning
+      # a hard stop within the horizon. v_ego > 3 to avoid triggering at
+      # near-standstill where path naturally truncates.
+      path_indicates_stop = path_end < (v_ego * 3.5) and v_ego > 3.0
+      stop_assist_active = (exp_mode and not lead_present and v_ego < 14.0
+                            and (model_decel < -0.3 or path_indicates_stop))
       if stop_assist_active and self.output_v_target > 0.1:
         self.output_v_target = 0.0
-        self.output_a_target = min(self.output_a_target, model_decel)
+        # Use the more aggressive of model_decel or our default -1.0.
+        # If path_indicates_stop fired but model_decel is tepid, we still
+        # want firm brake because the path tells us a stop is needed.
+        forced_a = min(model_decel, -1.0) if path_indicates_stop else model_decel
+        self.output_a_target = min(self.output_a_target, forced_a)
         self.source = LongitudinalPlanSource.cruise
+
+      # Takeoff-assist (green light, no lead): drive 0000052 seg 4 t=20.3
+      # showed the model knew to go (shouldStop=False, dAccel=+0.17,
+      # path_end=44m) for ~1s before the user gas-tapped, but actuators.accel
+      # stayed at 0 because longcontrol was still in stopping state (planner
+      # output was tiny positive, not enough to exit). Force v_target up
+      # when at standstill and model clearly wants to move so MPC plans a
+      # takeoff and longcontrol exits stopping; the SNG path's op_go_frames
+      # trigger then sees actuators.accel > 0.5 and fires the resume blast.
+      takeoff_wants_go = (v_ego < 0.5 and not lead_present
+                          and (model_decel > 0.1 or path_end > 30.0))
+      if takeoff_wants_go and self.output_v_target < 0.1:
+        # Honor cruise setpoint as the takeoff target so we don't accelerate
+        # past what the user set. v_cruise is the parameter passed in.
+        self.output_v_target = max(self.output_v_target, v_cruise)
     except (KeyError, AttributeError):
       pass
 
