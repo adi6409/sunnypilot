@@ -169,6 +169,38 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 
+    # Firm-brake clamp for two scenarios MPC's gentle ramp under-handles:
+    #  (1) stop-assist: sunnypilot's update_targets forced v_target=0
+    #      (no-lead red-light). Drive 0000004b seg 1 — condition was met
+    #      but OP only got to -1.4 m/s² because get_accel_from_plan looks
+    #      0.4s ahead and the ramp builds slowly.
+    #  (2) imminent-collision: lead present and TTC short. Drive 0000004b
+    #      seg 4 — 0.91 lead-prob at 70m closing -13 m/s, OP ramped only
+    #      to -1.7 over 4s; user braked.
+    # In both cases the planner KNOWS the situation but doesn't commit
+    # immediate decel. Clamp output_a_target after MPC so the immediate
+    # command is firm. min() preserves any stronger brake the planner
+    # already wants.
+    try:
+      stop_assist_active = self.output_v_target < 0.1 and self.is_e2e(sm)
+      lead = sm['radarState'].leadOne
+      v_ego = sm['carState'].vEgo
+      # TTC: lead.vRel is negative when closing. Avoid div-by-near-zero.
+      ttc = (lead.dRel / -lead.vRel) if (lead.status and lead.vRel < -1.0) else 1e6
+      # Imminent-collision: tighten brake clamp as TTC shrinks.
+      emergency_lead = lead.status and ttc < 4.0 and v_ego > 3.0
+      if stop_assist_active and not emergency_lead:
+        # Controlled stop, no rush — firm but comfortable.
+        output_a_target = min(output_a_target, -2.0)
+        self.output_should_stop = True
+      elif emergency_lead:
+        # Scale brake by TTC. At TTC=4 use -2.0; at TTC=2 use -3.0;
+        # at TTC=1 use -4.0 (clamped at vehicle's safe limit downstream).
+        required = float(np.interp(ttc, [1.0, 2.0, 3.0, 4.0], [-4.0, -3.0, -2.5, -2.0]))
+        output_a_target = min(output_a_target, required)
+    except (KeyError, AttributeError):
+      pass
+
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])
