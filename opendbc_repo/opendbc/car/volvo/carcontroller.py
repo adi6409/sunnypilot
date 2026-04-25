@@ -35,6 +35,14 @@ class CarController(CarControllerBase):
     # planner under-commands and stock cancels (drives 3e seg 7, 3f seg 11).
     self.takeoff_start_frame = -1_000_000
 
+    # op_go_frames: count of consecutive controlsd cycles where OP's planner
+    # is sustaining a "go" command at standstill. Used as an alternate SNG
+    # resume trigger for green-light-no-lead scenarios where ACC_Distance
+    # never changes (no lead to "move"). Tighter thresholds than the
+    # original (0.3 / 0.5s) which fired prematurely in drive 0000003e seg 7
+    # before we had radar/take-off-passthrough/ACC_Check fixes.
+    self.op_go_frames = 0
+
     # Next wall-clock nanosecond at which FSM3 / FSM1 TX is allowed.
     # controlsd scheduling jitter means self.frame % 2 == 0 gives us 10–30ms
     # intervals instead of a clean 20ms (drive 41 seg 4: OP TX stdev 2.6ms
@@ -130,6 +138,15 @@ class CarController(CarControllerBase):
     at_standstill = (CS.out.cruiseState.enabled and CS.out.cruiseState.standstill
                      and CS.out.vEgo < 0.01)
 
+    # Track sustained "OP wants to accelerate" while at standstill. Counter
+    # increments when planner is asking for non-trivial positive accel,
+    # resets otherwise. Used as alternate SNG trigger for green-light-no-
+    # lead (where lead_moved never fires).
+    if at_standstill and CC.longActive and actuators.accel > 0.5:
+      self.op_go_frames += 1
+    else:
+      self.op_go_frames = 0
+
     # SNG — evaluated BEFORE the long-control TX block so the take-off window
     # flag set here is visible when we pick OP-vs-stock accel below.
     # wait 100 cycles since last resume sent
@@ -139,15 +156,18 @@ class CarController(CarControllerBase):
         self.waiting = True
         self.sng_count = 0
 
-      # Trigger resume only on lead moving. The prior "op_wants_go" debounce
-      # (0.5s of planner accel > 0.3) was a workaround for OP not having a
-      # radar feed — it caused the car to resume before the lead actually
-      # pulled away and stock ACC cancelled mid-take-off (drive 0000003e seg 7).
-      # With the Delphi ESR wired up, the planner sees real leads and
-      # ACC_Distance flags stock's take-off the same instant stock sees it.
+      # Trigger resume on EITHER:
+      #   (a) lead moving — ACC_Distance increases (existing behavior, fires
+      #       when stock radar sees a lead pull away)
+      #   (b) op_go_frames > 100 — planner has sustained accel > 0.5 m/s² for
+      #       1 second straight (green-light-no-lead case where the user
+      #       implicitly wants to go, but we have no radar lead to track)
+      # Tighter than the original (0.3 / 0.5s) version which fired before
+      # the radar lead actually moved in drive 3e seg 7.
       lead_moved = CS.acc_distance > self.distance
+      op_wants_go = self.op_go_frames > 100  # 100 frames × 10 ms = 1.0 s
 
-      if at_standstill and self.waiting and lead_moved:
+      if at_standstill and self.waiting and (lead_moved or op_wants_go):
         # Send 25 resume buttons + 25 FSM3-ACC_Check=1 acks in the same TX
         # batch. Drive 0000004a seg 11 showed the resume button blast alone
         # (with our 50Hz ACC_Check=1 stream over 0.5s) was insufficient: the
