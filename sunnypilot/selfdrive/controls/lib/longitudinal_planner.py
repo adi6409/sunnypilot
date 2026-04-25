@@ -91,7 +91,7 @@ class LongitudinalPlannerSP:
       exp_mode = sm['selfdriveState'].experimentalMode
       model_decel = sm['modelV2'].action.desiredAcceleration
       lead_present = sm['radarState'].leadOne.status
-      stop_assist_active = (exp_mode and model_decel < -0.5 and
+      stop_assist_active = (exp_mode and model_decel < -0.3 and
                             not lead_present and v_ego < 14.0)
       if stop_assist_active and self.output_v_target > 0.1:
         self.output_v_target = 0.0
