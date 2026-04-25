@@ -89,6 +89,15 @@ class CarState(CarStateBase):
     ret.doorOpen = not all([pt_cp.vl["Doors"]["DriverDoorClosed"], pt_cp.vl["Doors"]["PassengerDoorClosed"]])
     ret.seatbeltUnlatched = False
 
+    # Electronic parking brake. The HandBrake message (0x2EE) reports
+    # Hand_Brake_State (0 = released, non-zero = engaged). Volvo's stock
+    # ACC delegates standstill hold to EPB after sustained standstill —
+    # if EPB engages while OP thinks it's holding, cruise will reject
+    # re-engagement until manually released. Reading this so future drives
+    # can show in rlog when EPB engaged (drive 0000004b 18:11:40 was a
+    # report of this without log visibility).
+    ret.parkingBrake = bool(pt_cp.vl["HandBrake"]["Hand_Brake_State"])
+
     # Store info from servo message PSCM1
     self.pscm_stock_values = pt_cp.vl["PSCM1"]
 
@@ -111,7 +120,8 @@ class CarState(CarStateBase):
       ("ACC_Speed", 50),
       ("MiscCarInfo", 25),
       ("Doors", 20),
-      ("SAS0", 100)
+      ("SAS0", 100),
+      ("HandBrake", 5),
     ]
 
     cam_messages = [

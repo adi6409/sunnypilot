@@ -52,18 +52,24 @@ class CarController(CarControllerBase):
     # (~0.5s of 50Hz TX) when SNG fires a resume blast; decrements to 0.
     self.sng_ack_frames = 0
 
-    # Stop-at-red-no-lead spoof: when OP wants to brake below ~43 km/h with no
-    # real radar lead, stock ACC hits its no-lead-low-speed disengage rule and
-    # cancels (drive 0000003e seg 7: ACC_Distance flipped 7→255 the same
-    # instant ACC_Enabled went False). To allow OP to decelerate to a full
-    # stop at red lights without a lead, TX a fake close-lead distance on
-    # FSM1's ACC_Distance, smoothly ramped in/out so the value never jumps
-    # (sudden 255→8 could fire pre-collision/AEB logic).
-    #
-    # ramp ∈ [0, 1]: 0 = pure passthrough of stock's ACC_Distance, 1 = full
-    # spoof (TX SPOOF_TARGET_M). Linear blend between the two on intermediate
-    # values. Steps by SPOOF_RAMP_STEP per FSM1 TX (50Hz) so 0→1 takes ~0.5s.
-    self.spoof_acc_distance_ramp = 0.0
+    # FSM1 ACC_Distance spoof state. We use a single smoothed value that
+    # ramps toward whichever target makes sense given the current scenario:
+    #   - Stop-at-red: 8 m (fake close lead so stock ACC keeps its
+    #     standstill-no-lead disengage rule from firing while OP brakes
+    #     to a stop)
+    #   - Engagement-assist: 30 m (fake comfortable lead so stock ACC
+    #     allows CC engagement at vEgo < 30 km/h, which it normally
+    #     refuses without a real radar lead)
+    #   - Otherwise: passes through stock's real ACC_Distance value
+    # Ramping is done at the meter level (RAMP_M m per 20 ms TX) so the
+    # ECM never sees a sudden jump in lead distance. State is initialized
+    # to 255 (no-lead) and re-synced from stock on first TX of any new
+    # session to avoid an initial "lead approaching" artifact.
+    self.tx_acc_distance_state = 255.0
+    self._fsm1_was_txing = False
+    # FSM1 TX cadence: 50 Hz, wall-clock gated like FSM3. FSM1 TX runs
+    # independently of longActive (also fires for engagement-assist).
+    self.next_fsm1_tx_nanos = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -167,12 +173,57 @@ class CarController(CarControllerBase):
         self.waiting = False
         self.last_resume_frame = self.frame
 
-    # Longitudinal: only TX when OP is actively controlling (longActive).
-    # Panda's fwd hook now unblocks stock FSM1/FSM3 when !gas_pressed, so
+    # Compute spoof conditions up-front. They're evaluated whether or not
+    # OP is in long-control because the FSM1 spoof can fire before
+    # longActive (engagement-assist).
+    stock_acc_dist = int(CS.stock_FSM1["ACC_Distance"])
+    no_real_lead = stock_acc_dist == 255
+    op_accel_planned = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+
+    # Stop-at-red: while OP is actively braking below ~43 km/h with no
+    # real lead, fake a close lead so stock ACC's no-lead-low-speed
+    # disengage rule doesn't fire mid-stop.
+    stop_at_red_active = (
+      CC.longActive
+      and op_accel_planned < -0.5
+      and CS.out.vEgo < 12.0
+      and no_real_lead
+    )
+
+    # Engagement-assist: stock Volvo ACC refuses to engage at 1 < vEgo <
+    # ~30 km/h unless there's a real radar lead. Fake a comfortable lead
+    # while CC system is on, we're slow, and there's no real lead — so
+    # the user can press SET at any speed and stock will accept.
+    # CAVEAT: only effective if stock FSM uses bus-visible FSM1 (not just
+    # internal radar) for its engagement-allow gating. Pre-engagement, panda
+    # fwd_hook does NOT block stock cam→main FSM1, so stock's real FSM1
+    # (with ACC_Distance=255) reaches the ECM in parallel with our TX —
+    # last-wins on the bus. If host-only spoof doesn't unlock engagement,
+    # the next step is changing fwd_hook to always block FSM1.
+    engagement_spoof_active = (
+      CS.out.cruiseState.available
+      and 1.0 < CS.out.vEgo < 9.0  # above near-stop, below stock's ~30 km/h floor
+      and no_real_lead
+    )
+
+    # Determine desired ACC_Distance to TX, then ramp toward it.
+    if stop_at_red_active:
+      desired_dist = 8.0
+    elif engagement_spoof_active:
+      desired_dist = 30.0
+    else:
+      desired_dist = float(stock_acc_dist)
+
+    RAMP_M = 4.0  # max change per FSM1 TX (50 Hz × 4 m = 200 m/s — fast enough that brief transients don't spike)
+    diff = desired_dist - self.tx_acc_distance_state
+    self.tx_acc_distance_state += max(min(diff, RAMP_M), -RAMP_M)
+    self.tx_acc_distance_state = max(0.0, min(255.0, self.tx_acc_distance_state))
+
+    # Longitudinal: only TX FSM3 when OP is actively controlling
+    # (longActive). FSM1 TX runs independently below for engagement-assist.
+    # Panda's fwd hook unblocks stock FSM1/FSM3 when !gas_pressed, so
     # during gas overrides stock flows through naturally and there's no
-    # starvation even though OP isn't TXing. When longActive flickers False
-    # due to gas press, OP withdraws from the bus entirely and the car
-    # sees stock's real-time FSM3 — matching pre-OP-long behavior.
+    # starvation even though OP isn't TXing.
     #
     # Rate gating: wall-clock 20ms minimum between TXs, so controlsd jitter
     # can't produce the 10ms bursts leomonde spotted. If we're late we still
@@ -188,7 +239,7 @@ class CarController(CarControllerBase):
         next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
       self.next_long_tx_nanos = next_tx
 
-      op_accel = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
+      op_accel = op_accel_planned
 
       # Take-off passthrough: after a SNG resume blast, while still rolling
       # below 5 m/s, defer to stock's ACC_AccelerationRequest when stock
@@ -227,43 +278,35 @@ class CarController(CarControllerBase):
       if self.sng_ack_frames > 0:
         self.sng_ack_frames -= 1
 
-      # Stop-at-red-no-lead spoof state.
-      # Activate when OP is actively braking AND we're inside / approaching the
-      # no-lead disengage zone (~30 km/h floor; we trigger from 43 km/h to give
-      # the ramp time to take effect) AND there is genuinely no real lead
-      # (stock ACC_Distance == 255). Don't spoof when stock sees a real lead —
-      # we'd be lying to the ECM about its location.
-      stock_acc_dist = int(CS.stock_FSM1["ACC_Distance"])
-      SPOOF_TARGET_M = 8        # fake "lead at 8m" — close enough to allow stop, far enough not to AEB
-      SPOOF_RAMP_STEP = 0.04    # per 50Hz frame → 0.5s full engage/disengage
-      SPOOF_BRAKE_THRESHOLD = -0.5  # OP must be commanding real brake (m/s²)
-      SPOOF_VEGO_CEILING = 12.0     # m/s ≈ 43 km/h — above this we never engage
-      spoof_should_be_active = (
-        op_accel < SPOOF_BRAKE_THRESHOLD
-        and CS.out.vEgo < SPOOF_VEGO_CEILING
-        and stock_acc_dist == 255
-      )
-      if spoof_should_be_active:
-        self.spoof_acc_distance_ramp = min(self.spoof_acc_distance_ramp + SPOOF_RAMP_STEP, 1.0)
-      else:
-        self.spoof_acc_distance_ramp = max(self.spoof_acc_distance_ramp - SPOOF_RAMP_STEP, 0.0)
-
-      if self.spoof_acc_distance_ramp > 0.0:
-        # Linear blend between stock's value and the fake target. At ramp=0
-        # this would equal stock_acc_dist (passthrough); at ramp=1 it equals
-        # SPOOF_TARGET_M. Intermediate values give the ECM a smooth
-        # "lead approaching" curve rather than a 255→8 jump that would look
-        # like a pre-collision event.
-        blended = stock_acc_dist + self.spoof_acc_distance_ramp * (SPOOF_TARGET_M - stock_acc_dist)
-        tx_acc_distance = max(0, min(255, round(blended)))
-      else:
-        tx_acc_distance = None  # passthrough, create_radar uses stock value
-
+      # FSM3 only — FSM1 TX is handled below in its own block (it can fire
+      # for engagement-assist independent of longActive).
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True, override_distance=tx_acc_distance))
 
-    # FSM3/FSM1 are TX'd together inside long_tx_due so they stay in the
-    # same bus frame and share the 50Hz cadence.
+    # FSM1 TX (50 Hz, wall-clock gated). Fires whenever:
+    #   - OP is in long-control (existing behavior — pass through or spoof)
+    #   - OR engagement-assist is active (TX a fake lead so stock allows
+    #     CC engagement at low speed without a real radar lead)
+    fsm1_tx_active = CC.longActive or engagement_spoof_active
+    fsm1_tx_due = fsm1_tx_active and now_nanos >= self.next_fsm1_tx_nanos
+    if fsm1_tx_due:
+      next_tx = self.next_fsm1_tx_nanos + self.LONG_TX_PERIOD_NANOS
+      if self.next_fsm1_tx_nanos == 0 or next_tx <= now_nanos:
+        next_tx = now_nanos + self.LONG_TX_PERIOD_NANOS
+      self.next_fsm1_tx_nanos = next_tx
+
+      # First TX after a quiet period: re-sync the smoothed state to stock's
+      # current value so we don't ramp from a stale/wrong starting point.
+      if not self._fsm1_was_txing:
+        self.tx_acc_distance_state = float(stock_acc_dist)
+      self._fsm1_was_txing = True
+
+      can_sends.append(volvocan.create_radar(
+        self.packer_pt, CS.stock_FSM1, True,
+        override_distance=int(self.tx_acc_distance_state)
+      ))
+    elif not fsm1_tx_active:
+      # Mark TX as inactive so next session re-syncs from stock value.
+      self._fsm1_was_txing = False
 
 
     new_actuators = actuators.as_builder()
