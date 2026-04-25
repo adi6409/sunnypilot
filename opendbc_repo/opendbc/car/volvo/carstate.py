@@ -24,6 +24,13 @@ class CarState(CarStateBase):
     # car speed
     ret.vEgoRaw = pt_cp.vl["VehicleSpeed1"]["VehicleSpeed"] * CV.KPH_TO_MS
     ret.vEgo, ret.aEgo = self.update_speed_kf(ret.vEgoRaw)
+    # Volvo P3 cluster pads displayed speed by ~7-9% above true CAN speed
+    # (regulatory: speedometer must never under-read). User reported
+    # comma showing 28 when cluster set to 30, 32 when cluster set to 35
+    # (ratios 1.071 and 1.094). vEgoCluster lets the UI show the cluster-
+    # matched value so the user's set point matches what they see.
+    VOLVO_CLUSTER_SCALE = 1.08
+    ret.vEgoCluster = ret.vEgoRaw * VOLVO_CLUSTER_SCALE
     ret.standstill = ret.vEgoRaw < 0.1
 
     # gas pedal
@@ -45,6 +52,9 @@ class CarState(CarStateBase):
 
     # cruise state
     ret.cruiseState.speed = pt_cp.vl["ACC_Speed"]["ACC_Speed"] * CV.KPH_TO_MS
+    # Same cluster-scale applied to ACC setpoint so what the UI shows
+    # matches what the user dialed on the car cluster.
+    ret.cruiseState.speedCluster = ret.cruiseState.speed * VOLVO_CLUSTER_SCALE
     ret.cruiseState.available = bool(cam_cp.vl["FSM0"]["ACC_Available"])
     ret.cruiseState.enabled = bool(cam_cp.vl["FSM0"]["ACC_Enabled"])
     # ACC_Standstill bit = 1 when Volvo's ACC is holding the car at 0 km/h
