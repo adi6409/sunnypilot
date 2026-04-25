@@ -52,6 +52,19 @@ class CarController(CarControllerBase):
     # (~0.5s of 50Hz TX) when SNG fires a resume blast; decrements to 0.
     self.sng_ack_frames = 0
 
+    # Stop-at-red-no-lead spoof: when OP wants to brake below ~43 km/h with no
+    # real radar lead, stock ACC hits its no-lead-low-speed disengage rule and
+    # cancels (drive 0000003e seg 7: ACC_Distance flipped 7→255 the same
+    # instant ACC_Enabled went False). To allow OP to decelerate to a full
+    # stop at red lights without a lead, TX a fake close-lead distance on
+    # FSM1's ACC_Distance, smoothly ramped in/out so the value never jumps
+    # (sudden 255→8 could fire pre-collision/AEB logic).
+    #
+    # ramp ∈ [0, 1]: 0 = pure passthrough of stock's ACC_Distance, 1 = full
+    # spoof (TX SPOOF_TARGET_M). Linear blend between the two on intermediate
+    # values. Steps by SPOOF_RAMP_STEP per FSM1 TX (50Hz) so 0→1 takes ~0.5s.
+    self.spoof_acc_distance_ramp = 0.0
+
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
     accel = 0.0  # always defined so SNG block never NameErrors
@@ -210,8 +223,40 @@ class CarController(CarControllerBase):
       if self.sng_ack_frames > 0:
         self.sng_ack_frames -= 1
 
+      # Stop-at-red-no-lead spoof state.
+      # Activate when OP is actively braking AND we're inside / approaching the
+      # no-lead disengage zone (~30 km/h floor; we trigger from 43 km/h to give
+      # the ramp time to take effect) AND there is genuinely no real lead
+      # (stock ACC_Distance == 255). Don't spoof when stock sees a real lead —
+      # we'd be lying to the ECM about its location.
+      stock_acc_dist = int(CS.stock_FSM1["ACC_Distance"])
+      SPOOF_TARGET_M = 8        # fake "lead at 8m" — close enough to allow stop, far enough not to AEB
+      SPOOF_RAMP_STEP = 0.04    # per 50Hz frame → 0.5s full engage/disengage
+      SPOOF_BRAKE_THRESHOLD = -0.5  # OP must be commanding real brake (m/s²)
+      SPOOF_VEGO_CEILING = 12.0     # m/s ≈ 43 km/h — above this we never engage
+      spoof_should_be_active = (
+        op_accel < SPOOF_BRAKE_THRESHOLD
+        and CS.out.vEgo < SPOOF_VEGO_CEILING
+        and stock_acc_dist == 255
+      )
+      if spoof_should_be_active:
+        self.spoof_acc_distance_ramp = min(self.spoof_acc_distance_ramp + SPOOF_RAMP_STEP, 1.0)
+      else:
+        self.spoof_acc_distance_ramp = max(self.spoof_acc_distance_ramp - SPOOF_RAMP_STEP, 0.0)
+
+      if self.spoof_acc_distance_ramp > 0.0:
+        # Linear blend between stock's value and the fake target. At ramp=0
+        # this would equal stock_acc_dist (passthrough); at ramp=1 it equals
+        # SPOOF_TARGET_M. Intermediate values give the ECM a smooth
+        # "lead approaching" curve rather than a 255→8 jump that would look
+        # like a pre-collision event.
+        blended = stock_acc_dist + self.spoof_acc_distance_ramp * (SPOOF_TARGET_M - stock_acc_dist)
+        tx_acc_distance = max(0, min(255, round(blended)))
+      else:
+        tx_acc_distance = None  # passthrough, create_radar uses stock value
+
       can_sends.append(volvocan.create_longitudinal(self.packer_pt, CS.stock_FSM3, accel, acc_check))
-      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True))
+      can_sends.append(volvocan.create_radar(self.packer_pt, CS.stock_FSM1, True, override_distance=tx_acc_distance))
 
     # FSM3/FSM1 are TX'd together inside long_tx_due so they stay in the
     # same bus frame and share the 50Hz cadence.

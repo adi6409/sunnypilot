@@ -92,19 +92,12 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
   return packer.make_can_msg("FSM3", 0, values)
 
 
-def create_radar(packer, stock_fsm1, long_active):
-  # Pass through ALL stock FSM1 bytes verbatim, INCLUDING ACC_Distance.
-  #
-  # Rationale for not spoofing ACC_Distance=255:
-  # - OP's planner has radarUnavailable=True → OP doesn't use ACC_Distance anyway
-  # - The car's stock ACC uses ACC_Distance to track lead vehicles and decide
-  #   whether to let the car slow below its 30 km/h engagement floor. When we
-  #   spoofed 255 ("no lead"), stock ACC would disengage when OP commanded
-  #   decel below 30, which via pcmCruise also disengaged OP and left the
-  #   driver to brake manually.
-  # - Letting stock's real ACC_Distance reach the car's ACC means the car
-  #   will follow a real lead vehicle to 0 km/h while OP controls the accel
-  #   byte — enabling experimental-mode stop-at-light when a lead is present.
+def create_radar(packer, stock_fsm1, long_active, override_distance=None):
+  # Pass through ALL stock FSM1 bytes verbatim by default. Caller may override
+  # ACC_Distance — used by the stop-at-red-no-lead spoof in carcontroller, which
+  # ramps a fake close-lead distance under stock ACC's engagement floor so OP
+  # can decelerate to 0 without stock self-cancelling. The 5-frame counter
+  # pattern in the rest of the bytes is preserved.
   _ = long_active  # kept for signature stability
   values = {s: stock_fsm1[s] for s in (
     "ACC_Distance",
@@ -116,4 +109,6 @@ def create_radar(packer, stock_fsm1, long_active):
     "Byte_6",
     "Byte_7",
   )}
+  if override_distance is not None:
+    values["ACC_Distance"] = int(override_distance)
   return packer.make_can_msg("FSM1", 0, values)
