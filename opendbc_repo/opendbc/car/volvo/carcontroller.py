@@ -142,13 +142,17 @@ class CarController(CarControllerBase):
       lead_moved = CS.acc_distance > self.distance
 
       if at_standstill and self.waiting and lead_moved:
-        # send 25 messages at a time to increases the likelihood of resume being accepted
+        # Send 25 resume buttons + 25 FSM3-ACC_Check=1 acks in the same TX
+        # batch. Drive 0000004a seg 11 showed the resume button blast alone
+        # (with our 50Hz ACC_Check=1 stream over 0.5s) was insufficient: the
+        # car never exited standstill hold (ACC_Standstill stayed 1, vEgo=0
+        # for 5s) and stock self-cancelled. Leomonde's original create_acc_
+        # state_msg burst pattern — ACC_Check=1 messages co-arriving with the
+        # button presses on the bus — is what the ECM actually requires to
+        # register the resume. Send it regardless of oplong; the long-control
+        # FSM3 TX continues at 50Hz separately.
         can_sends.extend([volvocan.create_button_msg(self.packer_pt, resume=True)] * 25)
-        if self.CP.openpilotLongitudinalControl:
-          # Already sending FSM3 every frame above; SNG just needs the resume button blast.
-          pass
-        else:
-          can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
+        can_sends.extend([volvocan.create_acc_state_msg(self.packer_pt)] * 25)
         # Mark the start of the take-off window on the first blast of this
         # resume cycle so the long block below can defer to stock's accel.
         # Also arm the ACC_Check=1 acknowledgement window for the next
