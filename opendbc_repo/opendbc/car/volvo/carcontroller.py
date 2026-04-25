@@ -270,6 +270,20 @@ class CarController(CarControllerBase):
       else:
         accel = op_accel
 
+      # Standstill firm-hold: when stopped with cruise engaged and not
+      # taking off, force a negative ACC_AccelerationRequest so the ECM
+      # sees active brake intent. OP's planner outputs op_accel=0 at
+      # full standstill (passive hold), but stock ACC interprets that as
+      # "no active brake" and (per drive 0000004c at user-reported
+      # 18:48:30) engages EPB ~2.3s later as a fallback hold — which
+      # cancels cruise and locks the user out until they manually
+      # release the EPB. -1.0 m/s² is firm enough that ECM won't ask
+      # BCM for EPB, and the car is already at v=0 so the value isn't
+      # actuated as additional decel.
+      if (CS.out.cruiseState.enabled and CS.out.vEgo < 0.05
+          and not in_takeoff_window and accel > -0.5):
+        accel = -1.0
+
       # ACC_Check: 1 only during the post-resume acknowledgement window
       # (set by the SNG block above), else 0. Copying stock's ACC_Check —
       # as we were doing — left it at 0 almost always, so SNG resumes
