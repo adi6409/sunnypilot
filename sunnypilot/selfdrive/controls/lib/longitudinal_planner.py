@@ -112,7 +112,7 @@ class LongitudinalPlannerSP:
       # standstill where path naturally truncates.
       path_indicates_stop = path_end < (v_ego * 5.0) and v_ego > 3.0
       stop_assist_active = (exp_mode and not lead_present and v_ego < 14.0
-                            and (model_decel < -0.3 or path_indicates_stop))
+                            and (model_decel < -0.1 or path_indicates_stop))
       if stop_assist_active and self.output_v_target > 0.1:
         self.output_v_target = 0.0
         # Use the more aggressive of model_decel or our default -1.0.

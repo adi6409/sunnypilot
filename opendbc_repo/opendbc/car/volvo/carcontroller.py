@@ -142,7 +142,7 @@ class CarController(CarControllerBase):
     # increments when planner is asking for non-trivial positive accel,
     # resets otherwise. Used as alternate SNG trigger for green-light-no-
     # lead (where lead_moved never fires).
-    if at_standstill and CC.longActive and actuators.accel > 0.5:
+    if at_standstill and CC.longActive and actuators.accel > 0.2:
       self.op_go_frames += 1
     else:
       self.op_go_frames = 0
@@ -159,13 +159,12 @@ class CarController(CarControllerBase):
       # Trigger resume on EITHER:
       #   (a) lead moving — ACC_Distance increases (existing behavior, fires
       #       when stock radar sees a lead pull away)
-      #   (b) op_go_frames > 100 — planner has sustained accel > 0.5 m/s² for
-      #       1 second straight (green-light-no-lead case where the user
+      #   (b) op_go_frames > 50 — planner has sustained accel > 0.2 m/s² for
+      #       0.5 second straight (green-light-no-lead case where the user
       #       implicitly wants to go, but we have no radar lead to track)
-      # Tighter than the original (0.3 / 0.5s) version which fired before
-      # the radar lead actually moved in drive 3e seg 7.
+      # Lowered from accel>0.5/100 frames so tepid takeoff intent still fires.
       lead_moved = CS.acc_distance > self.distance
-      op_wants_go = self.op_go_frames > 100  # 100 frames × 10 ms = 1.0 s
+      op_wants_go = self.op_go_frames > 50  # 50 frames × 10 ms = 0.5 s
 
       if at_standstill and self.waiting and (lead_moved or op_wants_go):
         # Send 25 resume buttons + 25 FSM3-ACC_Check=1 acks in the same TX
@@ -222,7 +221,7 @@ class CarController(CarControllerBase):
     # the next step is changing fwd_hook to always block FSM1.
     engagement_spoof_active = (
       CS.out.cruiseState.available
-      and 1.0 < CS.out.vEgo < 9.0  # above near-stop, below stock's ~30 km/h floor
+      and 1.0 < CS.out.vEgo < 11.0  # above near-stop, below stock's ~30 km/h floor (widened for more headroom)
       and no_real_lead
     )
 

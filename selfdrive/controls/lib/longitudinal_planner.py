@@ -187,36 +187,44 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       v_ego = sm['carState'].vEgo
       # TTC: lead.vRel is negative when closing. Avoid div-by-near-zero.
       ttc = (lead.dRel / -lead.vRel) if (lead.status and lead.vRel < -1.0) else 1e6
-      # Imminent-collision: tighten brake clamp as TTC shrinks. Drive 0000054
-      # seg 11 (23:40:40) showed TTC=3.97s at the moment user braked, with
-      # closing rate -18.6 m/s — physics required -2.34 m/s² to stop in 70m
-      # but our -2.0 clamp at TTC=4 was insufficient. Stiffen the curve.
-      emergency_lead = lead.status and ttc < 5.0 and v_ego > 3.0
-      # Also fire on high closing rate even if TTC math is borderline —
-      # lead radar can be jumpy and a closing rate > 8 m/s is itself a
-      # strong "stop now" signal for stationary or hard-braking leads.
-      high_closing = lead.status and lead.vRel < -8.0 and lead.dRel < 100.0
-      if stop_assist_active and not emergency_lead and not high_closing:
+      # yRel gate on all emergency triggers — radar in curves often locks
+      # onto roadside guardrails/poles which would falsely trigger firm
+      # brake on innocent corners. Real leads in our lane have |yRel| < ~2m.
+      lead_in_path = lead.status and abs(lead.yRel) < 2.0
+      # Imminent-collision: tighten brake clamp as TTC shrinks.
+      emergency_lead = lead_in_path and ttc < 6.0 and v_ego > 3.0
+      # High closing rate (lead suddenly stopped or hard-braking).
+      high_closing = lead_in_path and lead.vRel < -5.0 and lead.dRel < 100.0
+      # Stationary-target brake: if radar lead is essentially stationary
+      # in the world frame (vRel ≈ -vEgo) and within 80m, force firm
+      # brake regardless of TTC math — catches stopped queues earlier
+      # than TTC computation would (drive 54 23:40:40 brake event
+      # would have triggered ~5s earlier instead of 0.6s).
+      stationary_target = (lead_in_path and v_ego > 5.0
+                           and abs(lead.vRel + v_ego) < 2.0
+                           and lead.dRel < 80.0)
+      any_emergency = emergency_lead or high_closing or stationary_target
+      if stop_assist_active and not any_emergency:
         # Controlled stop, no rush — firm but comfortable.
         output_a_target = min(output_a_target, -2.0)
-        # Suppress shouldStop until we're nearly stopped. Drive 0000050
-        # showed that once shouldStop=True, longcontrol enters "stopping"
-        # state which caps brake at ~-0.5 m/s² (STOP_ACCEL) and our -2.0
-        # clamp gets overridden. Stay in PID mode with full brake
-        # authority while we're still rolling, let the natural mpc
-        # shouldStop kick in once v < 2 to do the soft final stop.
-        if v_ego > 2.0:
+        # Suppress shouldStop while still rolling so longcontrol stays
+        # in PID mode with full brake authority instead of falling into
+        # the stopping-state STOP_ACCEL cap.
+        if v_ego > 1.0:
           self.output_should_stop = False
-      elif emergency_lead or high_closing:
-        # Scale brake by TTC, stiffer than before. At TTC=5 -2.0, TTC=4
-        # -2.5, TTC=3 -3.0, TTC=2 -3.5, TTC=1 -4.0.
-        required = float(np.interp(ttc, [1.0, 2.0, 3.0, 4.0, 5.0],
-                                   [-4.0, -3.5, -3.0, -2.5, -2.0]))
-        # If high_closing fires but TTC is high, still want firm brake.
-        if high_closing and required > -2.5:
+      elif any_emergency:
+        # Scale brake by TTC. At TTC=6 -2.0, TTC=4 -2.5, TTC=3 -3.0,
+        # TTC=2 -3.5, TTC=1 -4.0.
+        required = float(np.interp(ttc, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                                   [-4.0, -3.5, -3.0, -2.5, -2.2, -2.0]))
+        if (high_closing or stationary_target) and required > -2.5:
           required = -2.5
+        # Stationary target needs at least firm-stop: physics says
+        # v²/2*d at v=15, d=50 = 2.25 m/s². Floor at -3.0 if very close.
+        if stationary_target and lead.dRel < 50.0:
+          required = min(required, -3.0)
         output_a_target = min(output_a_target, required)
-        if v_ego > 2.0:
+        if v_ego > 1.0:
           self.output_should_stop = False
     except (KeyError, AttributeError):
       pass
