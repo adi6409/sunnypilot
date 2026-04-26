@@ -103,10 +103,14 @@ class LongitudinalPlannerSP:
         path_end = float(pos_x[-1]) if len(pos_x) else 1000.0
       except Exception:
         path_end = 1000.0
-      # path_end < ~3 seconds of forward distance means model is planning
-      # a hard stop within the horizon. v_ego > 3 to avoid triggering at
-      # near-standstill where path naturally truncates.
-      path_indicates_stop = path_end < (v_ego * 3.5) and v_ego > 3.0
+      # path_end < ~5 seconds of forward distance means model is planning
+      # a hard stop within the horizon. Drive 0000054 23:40:40 brake event
+      # showed path_end shrinking from 96m to 65m over 2.5s while v stayed
+      # ~19 m/s — at v*3.5 the trigger only fired 0.2s before user braked,
+      # at v*5.0 it fires ~3s earlier and gives the firm-brake clamp time
+      # to actually take effect. v_ego > 3 to avoid triggering at near-
+      # standstill where path naturally truncates.
+      path_indicates_stop = path_end < (v_ego * 5.0) and v_ego > 3.0
       stop_assist_active = (exp_mode and not lead_present and v_ego < 14.0
                             and (model_decel < -0.3 or path_indicates_stop))
       if stop_assist_active and self.output_v_target > 0.1:
