@@ -203,7 +203,19 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       stationary_target = (lead_in_path and v_ego > 5.0
                            and abs(lead.vRel + v_ego) < 2.0
                            and lead.dRel < 80.0)
-      any_emergency = emergency_lead or high_closing or stationary_target
+      # Decelerating-lead pre-empt: lead is braking firmly while we're
+      # still on cruise speed. vRel hasn't gone negative yet (we're
+      # matching speed), so emergency_lead/high_closing/stationary all
+      # miss it — but stock CC reacts to aLeadK and starts braking
+      # 0.5–3 s before us. Drive 00000062 events: stock at -1.4 m/s²
+      # while OP planner still at +0.15 m/s², because aLeadK was -0.9
+      # to -1.5 with vRel still ≈ 0. Mirror stock by triggering on
+      # lead deceleration directly.
+      decelerating_lead = (lead_in_path and v_ego > 3.0
+                           and lead.aLeadK < -1.0
+                           and lead.dRel < 70.0)
+      any_emergency = (emergency_lead or high_closing
+                       or stationary_target or decelerating_lead)
       if stop_assist_active and not any_emergency:
         # Controlled stop, no rush — firm but comfortable.
         output_a_target = min(output_a_target, -2.0)
@@ -223,6 +235,12 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
         # v²/2*d at v=15, d=50 = 2.25 m/s². Floor at -3.0 if very close.
         if stationary_target and lead.dRel < 50.0:
           required = min(required, -3.0)
+        # Decelerating lead: at minimum match the lead's decel +20%
+        # margin so the gap stops shrinking. Without this we'd ramp
+        # in too soft (TTC math thinks we have time, but the gap is
+        # already collapsing because lead is slowing fast).
+        if decelerating_lead:
+          required = min(required, lead.aLeadK * 1.2)
         output_a_target = min(output_a_target, required)
         if v_ego > 1.0:
           self.output_should_stop = False
