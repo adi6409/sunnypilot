@@ -92,13 +92,20 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
   return packer.make_can_msg("FSM3", 0, values)
 
 
-def create_fsm0(packer, stock_fsm0, override_front_car=None):
+def create_fsm0(packer, stock_fsm0, override_front_car=None,
+                override_enabled=None, override_available=None):
   # Pass through ALL stock FSM0 bytes verbatim. Caller may override
-  # ACC_FrontCar — used by stop-at-red spoof to assert "lead present" so
-  # the ECM honors FSM3 brake commands. Volvo ECM ignores ACC_Acceleration-
-  # Request from FSM3 unless ACC_FrontCar=1 in FSM0 (drive 0000052 seg 3
-  # at t=204.7s: -2.0 m/s² commanded with FSM1 dist=8 spoofed for 4s,
-  # vEgo unchanged at 10.2 m/s — ECM ignored brake because FrontCar=0).
+  # ACC_FrontCar / ACC_Enabled / ACC_Available — used by stop-at-red
+  # spoof to make the ECM honor FSM3 brake commands.
+  #
+  # Drive 0000052 seg 3: -2.0 m/s² commanded, FSM1 dist=8 spoofed for 4s,
+  # FSM0 ACC_FrontCar=0 → ECM ignored brake. We added FrontCar=1 spoof.
+  #
+  # Drive 0000069 seg 7 t=476.86: -2.5 m/s² commanded, FSM1 dist=8 spoof
+  # active, FSM0 ACC_FrontCar=1 spoof active, BUT ACC_Enabled=0 (stock
+  # had dropped ACC after a brief standstill earlier). ECM still ignored
+  # brake — vEgo went 8.22 → 8.94 over 0.6s of firm brake command.
+  # Conclusion: ECM requires ACC_Enabled=1 too. Force both bits.
   values = {s: stock_fsm0[s] for s in (
     "Byte_0",
     "Byte_1",
@@ -116,6 +123,10 @@ def create_fsm0(packer, stock_fsm0, override_front_car=None):
   )}
   if override_front_car is not None:
     values["ACC_FrontCar"] = int(override_front_car)
+  if override_enabled is not None:
+    values["ACC_Enabled"] = int(override_enabled)
+  if override_available is not None:
+    values["ACC_Available"] = int(override_available)
   return packer.make_can_msg("FSM0", 0, values)
 
 

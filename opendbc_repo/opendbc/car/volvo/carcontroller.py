@@ -359,9 +359,24 @@ class CarController(CarControllerBase):
         next_tx = now_nanos + self.FSM0_TX_PERIOD_NANOS
       self.next_fsm0_tx_nanos = next_tx
 
-      override_fc = 1 if (stop_at_red_active or engagement_spoof_active) else None
+      # Spoof ACC_FrontCar=1 + ACC_Enabled=1 when stop_at_red_active so
+      # the ECM honors brake without a real lead. Drive 0000069 seg 7
+      # t=476.86 showed FrontCar=1 alone insufficient — Enabled=0
+      # (stock had dropped its loop after a prior standstill) caused
+      # ECM to still ignore -2.5 m/s². For engagement-assist (pre-SET),
+      # only spoof FrontCar — overriding Enabled before user presses SET
+      # would lie to stock's state machine about engagement.
+      override_fc = None
+      override_en = None
+      if stop_at_red_active:
+        override_fc = 1
+        override_en = 1
+      elif engagement_spoof_active:
+        override_fc = 1
       can_sends.append(volvocan.create_fsm0(
-        self.packer_pt, CS.stock_FSM0, override_front_car=override_fc
+        self.packer_pt, CS.stock_FSM0,
+        override_front_car=override_fc,
+        override_enabled=override_en,
       ))
 
 
