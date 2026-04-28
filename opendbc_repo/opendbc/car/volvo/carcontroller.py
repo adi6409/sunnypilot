@@ -75,6 +75,7 @@ class CarController(CarControllerBase):
     # session to avoid an initial "lead approaching" artifact.
     self.tx_acc_distance_state = 255.0
     self._fsm1_was_txing = False
+    self._stop_at_red_prev = False
     # FSM1 TX cadence: 50 Hz, wall-clock gated like FSM3. FSM1 TX runs
     # independently of longActive (also fires for engagement-assist).
     self.next_fsm1_tx_nanos = 0
@@ -238,10 +239,20 @@ class CarController(CarControllerBase):
     else:
       desired_dist = float(stock_acc_dist)
 
+    # Snap to target on stop_at_red rising edge. The 4 m/cycle ramp would
+    # otherwise take ~1.25s to traverse 255→8, and the ECM wouldn't see a
+    # close-lead until well after the brake command — drive 0000052 seg 3
+    # showed brake commanded with ramp still mid-traverse, ECM ignored.
+    # Real cut-ins cause similar dist jumps in stock operation, so the
+    # ECM tolerates discontinuities here.
+    if stop_at_red_active and not self._stop_at_red_prev:
+      self.tx_acc_distance_state = desired_dist
+
     RAMP_M = 4.0  # max change per FSM1 TX (50 Hz × 4 m = 200 m/s — fast enough that brief transients don't spike)
     diff = desired_dist - self.tx_acc_distance_state
     self.tx_acc_distance_state += max(min(diff, RAMP_M), -RAMP_M)
     self.tx_acc_distance_state = max(0.0, min(255.0, self.tx_acc_distance_state))
+    self._stop_at_red_prev = stop_at_red_active
 
     # Longitudinal: only TX FSM3 when OP is actively controlling
     # (longActive). FSM1 TX runs independently below for engagement-assist.
@@ -368,15 +379,21 @@ class CarController(CarControllerBase):
       # would lie to stock's state machine about engagement.
       override_fc = None
       override_en = None
+      override_av = None
       if stop_at_red_active:
         override_fc = 1
         override_en = 1
+        # Stock FSM0 always has Available=1 when Enabled=1; force it
+        # so we never present an internally inconsistent (Enabled=1,
+        # Available=0) state to the ECM.
+        override_av = 1
       elif engagement_spoof_active:
         override_fc = 1
       can_sends.append(volvocan.create_fsm0(
         self.packer_pt, CS.stock_FSM0,
         override_front_car=override_fc,
         override_enabled=override_en,
+        override_available=override_av,
       ))
 
 
