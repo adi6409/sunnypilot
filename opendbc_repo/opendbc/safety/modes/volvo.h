@@ -31,6 +31,12 @@ static const CanMsg VOLVO_EUCD_TX_MSGS[] = {
     // dominates via last-message-wins.
     {VOLVO_EUCD_FSM1,      VOLVO_MAIN_BUS, 8, .check_relay = false},
     {VOLVO_EUCD_FSM3,      VOLVO_MAIN_BUS, 8, .check_relay = false},
+    // FSM0: TX'd by OP when long-active so we can spoof ACC_FrontCar=1.
+    // Volvo ECM ignores FSM3 brake commands unless ACC_FrontCar=1 (drive
+    // 0000052 seg 3 t=204.7 — confirmed FSM1 dist=8 spoof + FSM3 -2 m/s²
+    // failed to brake while FrontCar=0). Same last-wins pattern as
+    // FSM1/FSM3.
+    {VOLVO_EUCD_FSM0,      VOLVO_MAIN_BUS, 8, .check_relay = false},
   };
 
   // TODO: add counters
@@ -141,7 +147,7 @@ static bool volvo_fwd_hook(int bus_num, int addr) {
   // (longActive=False). Car behaves identically to stock during the
   // override. When gas released, block and OP TX resume together.
   if (bus_num == VOLVO_CAM_BUS && controls_allowed && !gas_pressed) {
-    if (addr == VOLVO_EUCD_FSM1 || addr == VOLVO_EUCD_FSM3) {
+    if (addr == VOLVO_EUCD_FSM0 || addr == VOLVO_EUCD_FSM1 || addr == VOLVO_EUCD_FSM3) {
       return true;
     }
   }

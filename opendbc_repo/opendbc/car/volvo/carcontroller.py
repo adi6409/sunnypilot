@@ -78,6 +78,11 @@ class CarController(CarControllerBase):
     # FSM1 TX cadence: 50 Hz, wall-clock gated like FSM3. FSM1 TX runs
     # independently of longActive (also fires for engagement-assist).
     self.next_fsm1_tx_nanos = 0
+    # FSM0 TX cadence: 100 Hz to match stock (stock_FSM0 RX freq is 100Hz).
+    # If we TX at half-rate, we skip every other counter value in stock's
+    # 5-frame validation pattern → ECM faults after ~30s.
+    self.next_fsm0_tx_nanos = 0
+    self.FSM0_TX_PERIOD_NANOS = 10_000_000
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -340,6 +345,24 @@ class CarController(CarControllerBase):
     elif not fsm1_tx_active:
       # Mark TX as inactive so next session re-syncs from stock value.
       self._fsm1_was_txing = False
+
+    # FSM0 TX: same trigger as FSM1 (long control or engagement-assist).
+    # Override ACC_FrontCar=1 when stop_at_red_active or engagement-spoof,
+    # so the ECM honors brake commands / allows engagement without a real
+    # radar lead. Without this, FSM3 ACC_AccelerationRequest is ignored
+    # by the ECM when stock FSM0 reports FrontCar=0 (drive 0000052 seg 3).
+    fsm0_tx_active = CC.longActive or engagement_spoof_active
+    fsm0_tx_due = fsm0_tx_active and now_nanos >= self.next_fsm0_tx_nanos
+    if fsm0_tx_due:
+      next_tx = self.next_fsm0_tx_nanos + self.FSM0_TX_PERIOD_NANOS
+      if self.next_fsm0_tx_nanos == 0 or next_tx <= now_nanos:
+        next_tx = now_nanos + self.FSM0_TX_PERIOD_NANOS
+      self.next_fsm0_tx_nanos = next_tx
+
+      override_fc = 1 if (stop_at_red_active or engagement_spoof_active) else None
+      can_sends.append(volvocan.create_fsm0(
+        self.packer_pt, CS.stock_FSM0, override_front_car=override_fc
+      ))
 
 
     new_actuators = actuators.as_builder()

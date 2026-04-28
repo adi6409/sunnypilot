@@ -92,6 +92,33 @@ def create_longitudinal(packer, stock_fsm3, accel, acc_check):
   return packer.make_can_msg("FSM3", 0, values)
 
 
+def create_fsm0(packer, stock_fsm0, override_front_car=None):
+  # Pass through ALL stock FSM0 bytes verbatim. Caller may override
+  # ACC_FrontCar — used by stop-at-red spoof to assert "lead present" so
+  # the ECM honors FSM3 brake commands. Volvo ECM ignores ACC_Acceleration-
+  # Request from FSM3 unless ACC_FrontCar=1 in FSM0 (drive 0000052 seg 3
+  # at t=204.7s: -2.0 m/s² commanded with FSM1 dist=8 spoofed for 4s,
+  # vEgo unchanged at 10.2 m/s — ECM ignored brake because FrontCar=0).
+  values = {s: stock_fsm0[s] for s in (
+    "Byte_0",
+    "Byte_1",
+    "ACC_FrontCar",
+    "ACC_Available",
+    "ACC_Enabled",
+    "Byte_2_lo",
+    "Byte_3_lo",
+    "ACC_BrakeAlert",
+    "Byte_3_hi",
+    "Byte_4",
+    "Byte_5",
+    "Byte_6",
+    "Byte_7",
+  )}
+  if override_front_car is not None:
+    values["ACC_FrontCar"] = int(override_front_car)
+  return packer.make_can_msg("FSM0", 0, values)
+
+
 def create_radar(packer, stock_fsm1, long_active, override_distance=None):
   # Pass through ALL stock FSM1 bytes verbatim by default. Caller may override
   # ACC_Distance — used by the stop-at-red-no-lead spoof in carcontroller, which
