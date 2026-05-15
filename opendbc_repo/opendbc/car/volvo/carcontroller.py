@@ -35,14 +35,6 @@ class CarController(CarControllerBase):
     # planner under-commands and stock cancels (drives 3e seg 7, 3f seg 11).
     self.takeoff_start_frame = -1_000_000
 
-    # op_go_frames: count of consecutive controlsd cycles where OP's planner
-    # is sustaining a "go" command at standstill. Used as an alternate SNG
-    # resume trigger for green-light-no-lead scenarios where ACC_Distance
-    # never changes (no lead to "move"). Tighter thresholds than the
-    # original (0.3 / 0.5s) which fired prematurely in drive 0000003e seg 7
-    # before we had radar/take-off-passthrough/ACC_Check fixes.
-    self.op_go_frames = 0
-
     # Next wall-clock nanosecond at which FSM3 / FSM1 TX is allowed.
     # controlsd scheduling jitter means self.frame % 2 == 0 gives us 10–30ms
     # intervals instead of a clean 20ms (drive 41 seg 4: OP TX stdev 2.6ms
@@ -148,15 +140,6 @@ class CarController(CarControllerBase):
     at_standstill = (CS.out.cruiseState.enabled and CS.out.cruiseState.standstill
                      and CS.out.vEgo < 0.01)
 
-    # Track sustained "OP wants to accelerate" while at standstill. Counter
-    # increments when planner is asking for non-trivial positive accel,
-    # resets otherwise. Used as alternate SNG trigger for green-light-no-
-    # lead (where lead_moved never fires).
-    if at_standstill and CC.longActive and actuators.accel > 0.2:
-      self.op_go_frames += 1
-    else:
-      self.op_go_frames = 0
-
     # SNG — evaluated BEFORE the long-control TX block so the take-off window
     # flag set here is visible when we pick OP-vs-stock accel below.
     # wait 100 cycles since last resume sent
@@ -167,16 +150,20 @@ class CarController(CarControllerBase):
         self.sng_count = 0
 
       # Trigger resume on EITHER:
-      #   (a) lead moving — ACC_Distance increases (existing behavior, fires
-      #       when stock radar sees a lead pull away)
-      #   (b) op_go_frames > 50 — planner has sustained accel > 0.2 m/s² for
-      #       0.5 second straight (green-light-no-lead case where the user
-      #       implicitly wants to go, but we have no radar lead to track)
-      # Lowered from accel>0.5/100 frames so tepid takeoff intent still fires.
-      lead_moved = CS.acc_distance > self.distance
-      op_wants_go = self.op_go_frames > 50  # 50 frames × 10 ms = 0.5 s
+      #   (a) lead moving — ACC_Distance grows by >=2 m while both baseline
+      #       and current range indicate a real lead (not 255/no-lead). A 1 m
+      #       step is mostly quantization jitter and caused repeated false
+      #       resume blasts at red lights in drive 72 (20->21 m flicker).
+      #   (b) controlsd explicitly requests resume. This is the robust no-lead
+      #       green-light path: in drive 72 at 08:05.4 route-time, this flag
+      #       went true while ACC_Distance stayed flat.
+      lead_moved = (
+        self.distance < 45 and CS.acc_distance < 45 and
+        (CS.acc_distance - self.distance) >= 2
+      )
+      cc_resume_request = bool(CC.cruiseControl.resume) and not CC.longActive
 
-      if at_standstill and self.waiting and (lead_moved or op_wants_go):
+      if at_standstill and self.waiting and (lead_moved or cc_resume_request):
         # Send 25 resume buttons + 25 FSM3-ACC_Check=1 acks in the same TX
         # batch. Drive 0000004a seg 11 showed the resume button blast alone
         # (with our 50Hz ACC_Check=1 stream over 0.5s) was insufficient: the
@@ -196,6 +183,9 @@ class CarController(CarControllerBase):
         if self.sng_count == 0:
           self.takeoff_start_frame = self.frame
           self.sng_ack_frames = 25
+        # Advance baseline to current value once we fire. Prevents repeated
+        # resume cycles from the same stale delta during long red-light holds.
+        self.distance = CS.acc_distance
         self.sng_count += 1
       # disable sending resume after 5 cycles sent or if no more in standstill
       if self.waiting and (self.sng_count >= 5 or not CS.out.cruiseState.standstill):
