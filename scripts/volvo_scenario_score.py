@@ -22,6 +22,7 @@ from openpilot.tools.lib.logreader import LogReader
 FSM0_ADDR = 81
 FSM1_ADDR = 577
 FSM3_ADDR = 624
+CCBUTTONS_ADDR = 295
 
 
 @dataclass
@@ -42,14 +43,16 @@ class Frame:
   brake_pressed: Optional[bool] = None
 
 
-def iter_route(route_dir: Path) -> Tuple[List[Frame], Dict[int, Dict[int, int]], List[Tuple[float, int]]]:
+def iter_route(route_dir: Path) -> Tuple[List[Frame], Dict[int, Dict[int, int]], List[Tuple[float, int]], List[Tuple[float, int, bytes]]]:
   seg_dirs = sorted([p for p in route_dir.iterdir() if p.is_dir() and "--" in p.name], key=lambda p: int(p.name.rsplit("--", 1)[-1]))
   t0 = None
   rows: List[Frame] = []
   last = Frame(t=0.0, seg=-1)
   src_counts: Dict[int, Dict[int, int]] = {FSM0_ADDR: {}, FSM3_ADDR: {}}
   dist_events: List[Tuple[float, int]] = []
+  ccbutton_events: List[Tuple[float, int, bytes]] = []
   prev_dist: Optional[int] = None
+  prev_cc_by_src: Dict[int, bytes] = {}
 
   for seg_dir in seg_dirs:
     seg = int(seg_dir.name.rsplit("--", 1)[-1])
@@ -87,6 +90,11 @@ def iter_route(route_dir: Path) -> Tuple[List[Frame], Dict[int, Dict[int, int]],
         for c in m.can:
           if c.address in (FSM0_ADDR, FSM3_ADDR):
             src_counts[c.address][c.src] = src_counts[c.address].get(c.src, 0) + 1
+          if c.address == CCBUTTONS_ADDR and len(c.dat) == 8:
+            b = bytes(c.dat)
+            if prev_cc_by_src.get(c.src) != b:
+              ccbutton_events.append((t, c.src, b))
+              prev_cc_by_src[c.src] = b
           if c.address == FSM1_ADDR and len(c.dat) == 8:
             dist = int(c.dat[0])
             last.acc_distance = dist
@@ -96,7 +104,7 @@ def iter_route(route_dir: Path) -> Tuple[List[Frame], Dict[int, Dict[int, int]],
 
       rows.append(Frame(**{**last.__dict__, "t": t, "seg": seg}))
 
-  return rows, src_counts, dist_events
+  return rows, src_counts, dist_events, ccbutton_events
 
 
 def find_stops(rows: List[Frame], min_stationary_s: float = 2.0) -> List[Tuple[float, float, int]]:
@@ -222,6 +230,19 @@ def summarize_distance_events(dist_events: List[Tuple[float, int]], center_t: Op
     print(f"    t={t:.2f} dist={d}")
 
 
+def summarize_ccbutton_events(ccbutton_events: List[Tuple[float, int, bytes]], center_t: Optional[float]) -> None:
+  print("\n[Coherence] CCButtons events")
+  print(f"  total_changes={len(ccbutton_events)}")
+  if center_t is None:
+    return
+  lo = center_t - 20.0
+  hi = center_t + 20.0
+  nearby = [(t, src, dat) for t, src, dat in ccbutton_events if lo <= t <= hi]
+  print(f"  around_t={center_t:.1f}s window=[{lo:.1f},{hi:.1f}] events={len(nearby)}")
+  for t, src, dat in nearby[:40]:
+    print(f"    t={t:.2f} src={src} dat={dat.hex()}")
+
+
 def main() -> None:
   ap = argparse.ArgumentParser()
   ap.add_argument("--route", default="/Users/astroianu/personal/sunnypilot/routes/00000071--daba433334")
@@ -229,7 +250,7 @@ def main() -> None:
   args = ap.parse_args()
 
   route = Path(args.route)
-  rows, src_counts, dist_events = iter_route(route)
+  rows, src_counts, dist_events, ccbutton_events = iter_route(route)
   if not rows:
     raise SystemExit("No rows parsed; verify route path and rlogs")
 
@@ -245,6 +266,7 @@ def main() -> None:
   scenario_lead_cutin_near_standstill(rows)
   summarize_bus_source_counts(src_counts)
   summarize_distance_events(dist_events, args.focus_t)
+  summarize_ccbutton_events(ccbutton_events, args.focus_t)
 
 
 if __name__ == "__main__":
