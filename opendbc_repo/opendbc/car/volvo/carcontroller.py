@@ -199,21 +199,27 @@ class CarController(CarControllerBase):
     no_real_lead = stock_acc_dist == 255
     op_accel_planned = float(np.clip(actuators.accel, CarControllerParams.ACCEL_MIN, CarControllerParams.ACCEL_MAX))
 
-    # Stop-at-red: while OP is actively braking below ~43 km/h with no
+    op_stopping = actuators.longControlState == structs.CarControl.Actuators.LongControlState.stopping
+
+    # Stop-at-red: while OP is approaching a stop below ~43 km/h with no
     # real lead, fake a close lead so stock ACC's no-lead-low-speed
     # disengage rule doesn't fire mid-stop.
+    #
+    # Using only accel<-0.5 was too narrow: near-stop planner output often
+    # flattens toward zero while longControlState is still "stopping", which
+    # dropped spoofing mid-approach and reopened the no-lead no-stop failure.
     stop_at_red_active = (
       CC.longActive
-      and op_accel_planned < -0.5
+      and (op_stopping or op_accel_planned < -0.35)
       and CS.out.vEgo < 12.0
       and no_real_lead
     )
 
-    # Hold stop spoof for 0.6s once armed. This smooths over single-cycle
-    # planner oscillations around the brake threshold and keeps ECM-facing
+    # Hold stop spoof for 1.2s once armed. This smooths over short
+    # planner/state oscillations around stop entry and keeps ECM-facing
     # ACC front-car state coherent through stop entry.
     if stop_at_red_active:
-      self.stop_spoof_hold_frames = 60  # 60 * 10ms control frames
+      self.stop_spoof_hold_frames = 120  # 120 * 10ms control frames
     elif self.stop_spoof_hold_frames > 0:
       self.stop_spoof_hold_frames -= 1
     stop_spoof_latched = self.stop_spoof_hold_frames > 0
