@@ -84,6 +84,10 @@ class CarController(CarControllerBase):
     # 5-frame validation pattern → ECM faults after ~30s.
     self.next_fsm0_tx_nanos = 0
     self.FSM0_TX_PERIOD_NANOS = 10_000_000
+    # Latch no-lead stop spoof briefly once armed, so a transient drop in
+    # planner brake intent / longActive does not collapse FSM0/FSM1 spoof
+    # mid-stop and cause ECM to ignore subsequent brake requests.
+    self.stop_spoof_hold_frames = 0
 
   def update(self, CC, CC_SP, CS, now_nanos):
     can_sends = []
@@ -215,6 +219,15 @@ class CarController(CarControllerBase):
       and no_real_lead
     )
 
+    # Hold stop spoof for 0.6s once armed. This smooths over single-cycle
+    # planner oscillations around the brake threshold and keeps ECM-facing
+    # ACC front-car state coherent through stop entry.
+    if stop_at_red_active:
+      self.stop_spoof_hold_frames = 60  # 60 * 10ms control frames
+    elif self.stop_spoof_hold_frames > 0:
+      self.stop_spoof_hold_frames -= 1
+    stop_spoof_latched = self.stop_spoof_hold_frames > 0
+
     # Engagement-assist: stock Volvo ACC refuses to engage at 1 < vEgo <
     # ~30 km/h unless there's a real radar lead. Fake a comfortable lead
     # while CC system is on, we're slow, and there's no real lead — so
@@ -232,7 +245,7 @@ class CarController(CarControllerBase):
     )
 
     # Determine desired ACC_Distance to TX, then ramp toward it.
-    if stop_at_red_active:
+    if stop_spoof_latched:
       desired_dist = 8.0
     elif engagement_spoof_active:
       desired_dist = 30.0
@@ -245,14 +258,14 @@ class CarController(CarControllerBase):
     # showed brake commanded with ramp still mid-traverse, ECM ignored.
     # Real cut-ins cause similar dist jumps in stock operation, so the
     # ECM tolerates discontinuities here.
-    if stop_at_red_active and not self._stop_at_red_prev:
+    if stop_spoof_latched and not self._stop_at_red_prev:
       self.tx_acc_distance_state = desired_dist
 
     RAMP_M = 4.0  # max change per FSM1 TX (50 Hz × 4 m = 200 m/s — fast enough that brief transients don't spike)
     diff = desired_dist - self.tx_acc_distance_state
     self.tx_acc_distance_state += max(min(diff, RAMP_M), -RAMP_M)
     self.tx_acc_distance_state = max(0.0, min(255.0, self.tx_acc_distance_state))
-    self._stop_at_red_prev = stop_at_red_active
+    self._stop_at_red_prev = stop_spoof_latched
 
     # Longitudinal: only TX FSM3 when OP is actively controlling
     # (longActive). FSM1 TX runs independently below for engagement-assist.
@@ -380,7 +393,7 @@ class CarController(CarControllerBase):
       override_fc = None
       override_en = None
       override_av = None
-      if stop_at_red_active:
+      if stop_spoof_latched:
         override_fc = 1
         override_en = 1
         # Stock FSM0 always has Available=1 when Enabled=1; force it
