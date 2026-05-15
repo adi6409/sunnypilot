@@ -348,7 +348,7 @@ class CarController(CarControllerBase):
     #   - OP is in long-control (existing behavior — pass through or spoof)
     #   - OR engagement-assist is active (TX a fake lead so stock allows
     #     CC engagement at low speed without a real radar lead)
-    fsm1_tx_active = CC.longActive or engagement_spoof_active
+    fsm1_tx_active = CC.longActive or engagement_spoof_active or stop_spoof_latched
     fsm1_tx_due = fsm1_tx_active and now_nanos >= self.next_fsm1_tx_nanos
     if fsm1_tx_due:
       next_tx = self.next_fsm1_tx_nanos + self.LONG_TX_PERIOD_NANOS
@@ -375,7 +375,7 @@ class CarController(CarControllerBase):
     # so the ECM honors brake commands / allows engagement without a real
     # radar lead. Without this, FSM3 ACC_AccelerationRequest is ignored
     # by the ECM when stock FSM0 reports FrontCar=0 (drive 0000052 seg 3).
-    fsm0_tx_active = CC.longActive or engagement_spoof_active
+    fsm0_tx_active = CC.longActive or engagement_spoof_active or stop_spoof_latched
     fsm0_tx_due = fsm0_tx_active and now_nanos >= self.next_fsm0_tx_nanos
     if fsm0_tx_due:
       next_tx = self.next_fsm0_tx_nanos + self.FSM0_TX_PERIOD_NANOS
