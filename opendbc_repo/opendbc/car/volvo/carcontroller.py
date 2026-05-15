@@ -137,8 +137,10 @@ class CarController(CarControllerBase):
       # Avoids faults that will stop servo from accepting steering commands.
       can_sends.append(volvocan.create_lkas_state_msg(self.packer_pt, CS.out.steeringAngleDeg, CS.pscm_stock_values))
 
+    # vEgo hovers a few cm/s around zero at standstill; a strict 0.01 m/s
+    # gate intermittently suppressed SNG resume evaluation in no-lead stops.
     at_standstill = (CS.out.cruiseState.enabled and CS.out.cruiseState.standstill
-                     and CS.out.vEgo < 0.01)
+                     and CS.out.vEgo < 0.05)
 
     # SNG — evaluated BEFORE the long-control TX block so the take-off window
     # flag set here is visible when we pick OP-vs-stock accel below.
@@ -201,7 +203,7 @@ class CarController(CarControllerBase):
 
     op_stopping = actuators.longControlState == structs.CarControl.Actuators.LongControlState.stopping
 
-    # Stop-at-red: while OP is approaching a stop below ~43 km/h with no
+    # Stop-at-red: while OP is approaching a stop below ~54 km/h with no
     # real lead, fake a close lead so stock ACC's no-lead-low-speed
     # disengage rule doesn't fire mid-stop.
     #
@@ -211,15 +213,15 @@ class CarController(CarControllerBase):
     stop_at_red_active = (
       CC.longActive
       and (op_stopping or op_accel_planned < -0.35)
-      and CS.out.vEgo < 12.0
+      and CS.out.vEgo < 15.0
       and no_real_lead
     )
 
-    # Hold stop spoof for 1.2s once armed. This smooths over short
+    # Hold stop spoof for 1.8s once armed. This smooths over short
     # planner/state oscillations around stop entry and keeps ECM-facing
     # ACC front-car state coherent through stop entry.
     if stop_at_red_active:
-      self.stop_spoof_hold_frames = 120  # 120 * 10ms control frames
+      self.stop_spoof_hold_frames = 180  # 180 * 10ms control frames
     elif self.stop_spoof_hold_frames > 0:
       self.stop_spoof_hold_frames -= 1
     stop_spoof_latched = self.stop_spoof_hold_frames > 0
