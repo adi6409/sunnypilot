@@ -780,6 +780,7 @@ class TiciLPA(LPABase):
     return require_tag(require_tag(response, TAG_ENABLE_PROFILE, "EnableProfileResponse"), TAG_STATUS, "EnableProfile status")[0]
 
   def switch_profile(self, iccid: str) -> None:
+    target = next((p for p in self.list_profiles() if p.iccid == iccid), None)
     with self._acquire_channel():
       code = self._enable_profile(iccid)
       if code == PROFILE_CAT_BUSY:  # stale eUICC transaction, reset and retry
@@ -792,3 +793,29 @@ class TiciLPA(LPABase):
     if HARDWARE.get_device_type() == "mici":
       self._client.send_raw(b'AT+CFUN=0\rAT+CFUN=1\r')  # mici has no SIM presence pin; raw because CFUN=0 drops serial
       self._client._ensure_serial(reconnect=True)
+
+    if target is not None and target.is_comma:
+      # comma prime: roams, metered, no APN override
+      from openpilot.common.params import Params
+      params = Params()
+      params.put_bool("GsmRoaming", True)
+      params.put_bool("GsmMetered", True)
+      params.put("GsmApn", "")
+
+  def is_euicc(self) -> bool:
+    # +CCHO:<n> -> eUICC; bare ERROR -> applet absent, non-eUICC; +CME ERROR -> applet
+    # exists but bus busy or modem in transient state, still eUICC.
+    with self._acquire_lock():
+      try:
+        lines = self._client.query(f'AT+CCHO="{ISDR_AID}"')
+      except RuntimeError as e:
+        return "+CME ERROR" in str(e)
+      for line in lines:
+        if line.startswith("+CCHO:") and (ch := line.split(":", 1)[1].strip()):
+          try:
+            self._client.query(f"AT+CCHC={ch}")
+          except (RuntimeError, TimeoutError):
+            pass
+          self._client.channel = None
+          return True
+      return False
