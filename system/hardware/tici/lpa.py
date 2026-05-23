@@ -805,7 +805,7 @@ class TiciLPA(LPABase):
   def is_euicc(self) -> bool:
     # +CCHO:<n> -> eUICC; bare ERROR -> applet absent, non-eUICC; +CME ERROR -> applet
     # exists but bus busy or modem in transient state, still eUICC.
-    with self._acquire_lock():
+    with self._acquire_channel():
       try:
         lines = self._client.query(f'AT+CCHO="{ISDR_AID}"')
       except RuntimeError as e:
