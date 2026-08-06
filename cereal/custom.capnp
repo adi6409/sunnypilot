@@ -194,6 +194,7 @@ struct LongitudinalPlanSP @0xf35cc4560bbf6ec2 {
   aTarget @5 :Float32;
   events @6 :List(OnroadEventSP.Event);
   e2eAlerts @7 :E2eAlerts;
+  volvoStopAssistActive @8 :Bool;
 
   struct DynamicExperimentalControl {
     state @0 :DynamicExperimentalControlState;
@@ -371,6 +372,11 @@ struct CarControlSP @0xa5cd762cd951a455 {
   leadOne @2 :LeadData;
   leadTwo @3 :LeadData;
   intelligentCruiseButtonManagement @4 :IntelligentCruiseButtonManagement;
+  # Volvo-only diagnostic/control hints. These do not enable controls; they
+  # only let carcontroller distinguish a deliberate no-lead stop from the
+  # normal longitudinal-controller transient at engagement.
+  volvoBrakeTestActive @5 :Bool;
+  volvoStopAssistActive @6 :Bool;
 
   struct Param {
     key @0 :Text;
@@ -435,6 +441,8 @@ struct BackupManagerSP @0xf98d843bfd7004a3 {
 
 struct CarStateSP @0xb86e6369214c01c8 {
   speedLimit @0 :Float32;
+  volvoVirtualLeadSimulated @1 :Bool;
+  volvoVirtualLeadAccepted @2 :Bool;
 }
 
 struct LiveMapDataSP @0xf416ec09499d9d19 {
@@ -456,7 +464,20 @@ struct ModelDataV2SP @0xa1680744031fdb2d {
   }
 }
 
-struct CustomReserved10 @0xcb9fd56c7057593a {
+struct VolvoBrakeTestStateSP @0xcb9fd56c7057593a {
+  armed @0 :Bool;
+  enabled @1 :Bool;
+  active @2 :Bool;
+  longActive @3 :Bool;
+  noLead @4 :Bool;
+  pedalsClear @5 :Bool;
+  speedKph @6 :Float32;
+  ready @7 :Bool;
+  standstill @8 :Bool;
+  resumeReady @9 :Bool;
+  virtualLeadSimulated @10 :Bool;
+  virtualLeadAccepted @11 :Bool;
+  used @12 :Bool;
 }
 
 struct CustomReserved11 @0xc2243c65e0340384 {

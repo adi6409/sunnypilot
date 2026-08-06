@@ -31,7 +31,7 @@ class ControlsExt(ModelStateBase):
     self.CP_SP = messaging.log_from_bytes(params.get("CarParamsSP", block=True), custom.CarParamsSP)
     cloudlog.info("controlsd_ext got CarParamsSP")
 
-    self.sm_services_ext = ['radarState', 'selfdriveStateSP']
+    self.sm_services_ext = ['radarState', 'selfdriveStateSP', 'longitudinalPlanSP']
     self.pm_services_ext = ['carControlSP']
 
   def initialize_lateral_control(self, lac, CI, dt):
@@ -97,6 +97,15 @@ class ControlsExt(ModelStateBase):
     CC_SP.mads = sm['selfdriveStateSP'].mads
 
     CC_SP.intelligentCruiseButtonManagement = sm['selfdriveStateSP'].intelligentCruiseButtonManagement
+
+    # A large negative accel is not sufficient evidence of a deliberate
+    # no-lead stop. Longcontrol can briefly output -2 m/s^2 on engagement
+    # while its state initializes. Publish explicit intent so the Volvo
+    # controller cannot turn that transient into a fake stopped vehicle.
+    brake_test = getattr(self, "volvo_brake_test", None)
+    CC_SP.volvoBrakeTestActive = bool(brake_test is not None and brake_test.active)
+    CC_SP.volvoStopAssistActive = (sm.valid['longitudinalPlanSP'] and
+                                    sm['longitudinalPlanSP'].volvoStopAssistActive)
 
     return CC_SP
 

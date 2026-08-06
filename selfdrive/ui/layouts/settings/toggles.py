@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from cereal import log
 from openpilot.common.params import Params, UnknownKeyName
 from openpilot.system.ui.widgets import Widget
@@ -14,6 +16,7 @@ if gui_app.sunnypilot_ui():
   from openpilot.system.ui.sunnypilot.widgets.list_view import multiple_button_item_sp as multiple_button_item
 
 PERSONALITY_TO_INT = log.LongitudinalPersonality.schema.enumerants
+VOLVO_BRAKE_TEST_ARM_FILE = Path("/data/volvo_brake_test_armed")
 
 # Description constants
 DESCRIPTIONS = {
@@ -35,6 +38,10 @@ DESCRIPTIONS = {
   'RecordFront': tr_noop("Upload data from the driver facing camera and help improve the driver monitoring algorithm."),
   "IsMetric": tr_noop("Display speed in km/h instead of mph."),
   "RecordAudio": tr_noop("Record and store microphone audio while driving. The audio will be included in the dashcam video in comma connect."),
+  "VolvoBrakeTest": tr_noop(
+    "Arm the phone-controlled Volvo brake diagnostic. This can be changed onroad only while the car is stationary and sunnypilot is disengaged. " +
+    "Open http://DEVICE_IP:8089 after arming. The test automatically clears after the drive or a manager restart."
+  ),
 }
 
 
@@ -106,6 +113,15 @@ class TogglesLayout(Widget):
       icon="speed_limit.png"
     )
 
+    self._volvo_brake_test_toggle = toggle_item(
+      lambda: tr("Arm Volvo Brake Test"),
+      lambda: tr(DESCRIPTIONS["VolvoBrakeTest"]),
+      VOLVO_BRAKE_TEST_ARM_FILE.exists(),
+      callback=self._on_volvo_brake_test_mode,
+      icon="warning.png",
+    )
+    self._volvo_brake_test_toggle.action_item.set_enabled(self._can_arm_volvo_brake_test)
+
     self._toggles = {}
     self._locked_toggles = set()
     for param, (title, desc, icon, needs_restart) in self._toggle_defs.items():
@@ -134,6 +150,9 @@ class TogglesLayout(Widget):
         self._locked_toggles.add(param)
 
       self._toggles[param] = toggle
+
+      if param == "ExperimentalMode":
+        self._toggles["VolvoBrakeTest"] = self._volvo_brake_test_toggle
 
       # insert longitudinal personality after NDOG toggle
       if param == "DisengageOnAccelerator":
@@ -172,6 +191,12 @@ class TogglesLayout(Widget):
     )
 
     if ui_state.CP is not None:
+      volvo_brake_test_available = (ui_state.CP.brand == "volvo" and ui_state.CP.openpilotLongitudinalControl and
+                                    not self._is_release)
+      self._volvo_brake_test_toggle.set_visible(volvo_brake_test_available)
+      if not volvo_brake_test_available:
+        VOLVO_BRAKE_TEST_ARM_FILE.unlink(missing_ok=True)
+
       if ui_state.has_longitudinal_control:
         self._toggles["ExperimentalMode"].action_item.set_enabled(True)
         self._toggles["ExperimentalMode"].set_description(e2e_description)
@@ -195,6 +220,7 @@ class TogglesLayout(Widget):
 
         self._toggles["ExperimentalMode"].set_description("<b>" + long_desc + "</b><br><br>" + e2e_description)
     else:
+      self._volvo_brake_test_toggle.set_visible(False)
       self._toggles["ExperimentalMode"].set_description(e2e_description)
 
     self._update_experimental_mode_icon()
@@ -203,6 +229,7 @@ class TogglesLayout(Widget):
     # refresh toggles from params to mirror external changes
     for param in self._toggle_defs:
       self._toggles[param].action_item.set_state(self._params.get_bool(param))
+    self._volvo_brake_test_toggle.action_item.set_state(VOLVO_BRAKE_TEST_ARM_FILE.exists())
 
     # these toggles need restart, block while engaged
     for toggle_def in self._toggle_defs:
@@ -235,6 +262,38 @@ class TogglesLayout(Widget):
     else:
       self._update_experimental_mode_icon()
       self._params.put_bool("ExperimentalMode", state)
+
+  @staticmethod
+  def _can_arm_volvo_brake_test() -> bool:
+    if ui_state.engaged:
+      return False
+    if not ui_state.started:
+      return True
+    CS = ui_state.sm["carState"]
+    return ui_state.sm.valid["carState"] and abs(CS.vEgo) < 0.3
+
+  def _on_volvo_brake_test_mode(self, state: bool):
+    if state:
+      if not self._can_arm_volvo_brake_test():
+        self._volvo_brake_test_toggle.action_item.set_state(False)
+        return
+
+      def confirm_callback(result: DialogResult):
+        confirmed = result == DialogResult.CONFIRM and self._can_arm_volvo_brake_test()
+        if confirmed:
+          VOLVO_BRAKE_TEST_ARM_FILE.touch()
+          for param in ("JoystickDebugMode", "LongitudinalManeuverMode", "LateralManeuverMode"):
+            self._params.put_bool(param, False)
+        else:
+          VOLVO_BRAKE_TEST_ARM_FILE.unlink(missing_ok=True)
+        self._volvo_brake_test_toggle.action_item.set_state(confirmed)
+
+      content = ("<h1>Arm Volvo Brake Test?</h1><br>" +
+                 "<p>This enables the phone-controlled brake, red-light stop, and green-light resume diagnostics. " +
+                 "Use only on an empty road with your foot ready over the brake.</p>")
+      gui_app.push_widget(ConfirmDialog(content, tr("Arm"), rich=True, callback=confirm_callback))
+    else:
+      VOLVO_BRAKE_TEST_ARM_FILE.unlink(missing_ok=True)
 
   def _toggle_callback(self, state: bool, param: str):
     if param == "ExperimentalMode":

@@ -169,6 +169,102 @@ class LongitudinalPlanner(LongitudinalPlannerSP):
       output_a_target = output_a_target_mpc
       self.output_should_stop = output_should_stop_mpc
 
+    # Firm-brake clamp for two scenarios MPC's gentle ramp under-handles:
+    #  (1) stop-assist: sunnypilot's update_targets forced v_target=0
+    #      (no-lead red-light). Drive 0000004b seg 1 — condition was met
+    #      but OP only got to -1.4 m/s² because get_accel_from_plan looks
+    #      0.4s ahead and the ramp builds slowly.
+    #  (2) imminent-collision: lead present and TTC short. Drive 0000004b
+    #      seg 4 — 0.91 lead-prob at 70m closing -13 m/s, OP ramped only
+    #      to -1.7 over 4s; user braked.
+    # In both cases the planner KNOWS the situation but doesn't commit
+    # immediate decel. Clamp output_a_target after MPC so the immediate
+    # command is firm. min() preserves any stronger brake the planner
+    # already wants.
+    try:
+      stop_assist_active = self.output_v_target < 0.1 and self.is_e2e(sm)
+      lead = sm['radarState'].leadOne
+      v_ego = sm['carState'].vEgo
+      model_should_stop = bool(sm['modelV2'].action.shouldStop)
+      model_desired_accel = float(sm['modelV2'].action.desiredAcceleration)
+      pos_x = sm['modelV2'].position.x
+      path_end = float(pos_x[-1]) if len(pos_x) else 0.0
+      # TTC: lead.vRel is negative when closing. Avoid div-by-near-zero.
+      ttc = (lead.dRel / -lead.vRel) if (lead.status and lead.vRel < -1.0) else 1e6
+      # yRel gate on all emergency triggers — radar in curves often locks
+      # onto roadside guardrails/poles which would falsely trigger firm
+      # brake on innocent corners. Real leads in our lane have |yRel| < ~2m.
+      lead_in_path = lead.status and abs(lead.yRel) < 2.0
+      # Imminent-collision: tighten brake clamp as TTC shrinks.
+      emergency_lead = lead_in_path and ttc < 6.0 and v_ego > 3.0
+      # High closing rate (lead suddenly stopped or hard-braking).
+      high_closing = lead_in_path and lead.vRel < -5.0 and lead.dRel < 100.0
+      # Stationary-target brake: if radar lead is essentially stationary
+      # in the world frame (vRel ≈ -vEgo) and within 80m, force firm
+      # brake regardless of TTC math — catches stopped queues earlier
+      # than TTC computation would (drive 54 23:40:40 brake event
+      # would have triggered ~5s earlier instead of 0.6s).
+      stationary_target = (lead_in_path and v_ego > 5.0
+                           and abs(lead.vRel + v_ego) < 2.0
+                           and lead.dRel < 80.0)
+      # Decelerating-lead pre-empt: lead is braking firmly while we're
+      # still on cruise speed. vRel hasn't gone negative yet (we're
+      # matching speed), so emergency_lead/high_closing/stationary all
+      # miss it — but stock CC reacts to aLeadK and starts braking
+      # 0.5–3 s before us. Drive 00000062 events: stock at -1.4 m/s²
+      # while OP planner still at +0.15 m/s², because aLeadK was -0.9
+      # to -1.5 with vRel still ≈ 0. Mirror stock by triggering on
+      # lead deceleration directly.
+      decelerating_lead = (lead_in_path and v_ego > 3.0
+                           and lead.aLeadK < -1.0
+                           and lead.dRel < 70.0)
+      any_emergency = (emergency_lead or high_closing
+                       or stationary_target or decelerating_lead)
+      if stop_assist_active and not any_emergency:
+        # Controlled stop, no rush — firm but comfortable.
+        output_a_target = min(output_a_target, -2.0)
+        # Suppress shouldStop while still rolling so longcontrol stays
+        # in PID mode with full brake authority instead of falling into
+        # the stopping-state STOP_ACCEL cap.
+        if v_ego > 1.0:
+          self.output_should_stop = False
+      elif any_emergency:
+        # Scale brake by TTC. At TTC=6 -2.0, TTC=4 -2.5, TTC=3 -3.0,
+        # TTC=2 -3.5, TTC=1 -4.0.
+        required = float(np.interp(ttc, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                                   [-4.0, -3.5, -3.0, -2.5, -2.2, -2.0]))
+        if (high_closing or stationary_target) and required > -2.5:
+          required = -2.5
+        # Stationary target needs at least firm-stop: physics says
+        # v²/2*d at v=15, d=50 = 2.25 m/s². Floor at -3.0 if very close.
+        if stationary_target and lead.dRel < 50.0:
+          required = min(required, -3.0)
+        # Decelerating lead: at minimum match the lead's decel +20%
+        # margin so the gap stops shrinking. Without this we'd ramp
+        # in too soft (TTC math thinks we have time, but the gap is
+        # already collapsing because lead is slowing fast).
+        if decelerating_lead:
+          required = min(required, lead.aLeadK * 1.2)
+        output_a_target = min(output_a_target, required)
+        if v_ego > 1.0:
+          self.output_should_stop = False
+
+      # Standstill no-lead takeoff assist:
+      # In some green-light launches the model path extends far ahead, but
+      # shouldStop can stay latched true for ~1s, which blocks resume and
+      # keeps longcontrol in stopping until the user gas-taps.
+      # If intent-to-go is clear at standstill, clear shouldStop and seed a
+      # small positive accel to let longcontrol exit stop hold.
+      takeoff_intent = (self.is_e2e(sm)
+                        and v_ego < 0.3
+                        and not lead.status
+                        and (path_end > 30.0 or model_desired_accel > 0.15 or not model_should_stop))
+      if takeoff_intent:
+        self.output_should_stop = False
+        output_a_target = max(output_a_target, 0.25)
+    except (KeyError, AttributeError):
+      pass
+
     for idx in range(2):
       accel_clip[idx] = np.clip(accel_clip[idx], self.prev_accel_clip[idx] - 0.05, self.prev_accel_clip[idx] + 0.05)
     self.output_a_target = np.clip(output_a_target, accel_clip[0], accel_clip[1])

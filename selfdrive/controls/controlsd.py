@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 from numbers import Number
+import os
+import time
 
 from cereal import car, log
 import cereal.messaging as messaging
@@ -17,6 +19,7 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.volvo_brake_test import VolvoBrakeTest, VolvoBrakeTestMode
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -43,9 +46,10 @@ class Controls(ControlsExt):
 
     self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
                                    'liveCalibration', 'livePose', 'longitudinalPlan', 'lateralManeuverPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'liveDelay'] + self.sm_services_ext,
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'liveDelay', 'testJoystick',
+                                   'carStateSP'] + self.sm_services_ext,
                                   poll='selfdriveState')
-    self.pm = messaging.PubMaster(['carControl', 'controlsState'] + self.pm_services_ext)
+    self.pm = messaging.PubMaster(['carControl', 'controlsState', 'volvoBrakeTestStateSP'] + self.pm_services_ext)
 
     self.steer_limited_by_safety = False
     self.curvature = 0.0
@@ -55,6 +59,9 @@ class Controls(ControlsExt):
     self.calibrated_pose: Pose | None = None
 
     self.LoC = LongControl(self.CP, self.CP_SP)
+    self.volvo_brake_test_armed = (self.CP.brand == "volvo" and self.CP.openpilotLongitudinalControl and
+                                   os.path.exists("/data/volvo_brake_test_armed"))
+    self.volvo_brake_test = VolvoBrakeTest()
     self.VM = VehicleModel(self.CP)
     self.LaC: LatControl
     if self.CP.steerControlType == car.CarParams.SteerControlType.angle:
@@ -133,6 +140,67 @@ class Controls(ControlsExt):
     pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, self.CP_SP, CS.vEgo, CS.vCruise * CV.KPH_TO_MS)
     actuators.accel = float(self.LoC.update(CC.longActive, CS, long_plan.aTarget, long_plan.shouldStop, pid_accel_limits))
 
+    # Guarded one-shot diagnostic: inject a short low-speed brake pulse through
+    # the normal CarControl -> CarController -> panda path. This never enables
+    # controls itself and immediately cancels if any eligibility condition drops.
+    joystick_fresh = (self.sm.recv_frame['testJoystick'] > 0 and
+                      (self.sm.frame - self.sm.recv_frame['testJoystick']) * DT_CTRL < 0.25)
+    buttons = self.sm['testJoystick'].buttons
+    if joystick_fresh and any(buttons):
+      # The test can be armed from Toggles after controlsd has already started
+      # (onroad, stationary, disengaged), so refresh only on an actual trigger.
+      self.volvo_brake_test_armed = (self.CP.brand == "volvo" and self.CP.openpilotLongitudinalControl and
+                                     os.path.exists("/data/volvo_brake_test_armed"))
+    brake_test_resume_trigger = joystick_fresh and len(buttons) > 2 and buttons[2]
+    brake_test_speed = abs(CS.vEgo)
+    brake_test_start_speed = self.volvo_brake_test.config.min_speed <= brake_test_speed <= self.volvo_brake_test.config.max_speed
+    brake_test_trigger = None
+    if joystick_fresh and brake_test_start_speed:
+      if len(buttons) > 1 and buttons[1]:
+        brake_test_trigger = VolvoBrakeTestMode.stop
+      elif len(buttons) > 0 and buttons[0]:
+        brake_test_trigger = VolvoBrakeTestMode.pulse
+
+    brake_test_mode = self.volvo_brake_test.mode or brake_test_trigger
+    brake_test_min_speed = 0.0 if brake_test_mode == VolvoBrakeTestMode.stop else self.volvo_brake_test.config.cancel_speed
+    brake_test_eligible = (self.volvo_brake_test_armed and self.sm['selfdriveState'].active and CC.longActive and
+                           CS.cruiseState.enabled and 0.0 < CS.vCruise < 250.0 and
+                           not CS.gasPressed and not CS.brakePressed and not long_plan.hasLead and
+                           brake_test_min_speed <= brake_test_speed <= self.volvo_brake_test.config.max_speed)
+    brake_test_was_active = self.volvo_brake_test.active
+    brake_test_resume_was_active = self.volvo_brake_test.resume_active
+    brake_test_accel = self.volvo_brake_test.update(time.monotonic(), brake_test_trigger, brake_test_eligible,
+                                                    CS.vEgo, CS.standstill, brake_test_resume_trigger)
+
+    if self.volvo_brake_test.resume_active and not brake_test_resume_was_active:
+      cloudlog.warning("Volvo brake stop test: green-light resume requested")
+    elif brake_test_resume_was_active and not self.volvo_brake_test.resume_active:
+      result = "vehicle moving" if self.volvo_brake_test.resume_completed else "failed; standstill hold restored"
+      cloudlog.warning(f"Volvo brake stop test: resume {result}")
+    elif self.volvo_brake_test.active and not brake_test_was_active:
+      cloudlog.warning(f"Volvo brake {self.volvo_brake_test.mode.name} test started at {CS.vEgo * CV.MS_TO_KPH:.1f} km/h")
+    elif brake_test_was_active and not self.volvo_brake_test.active and not self.volvo_brake_test.resume_active:
+      if self.volvo_brake_test.cancel_cruise:
+        reason = "timed out; requesting cruise cancel"
+      else:
+        reason = "completed" if brake_test_eligible else "cancelled by failed precondition"
+      cloudlog.warning(f"Volvo brake test {reason}")
+
+    if brake_test_accel is not None:
+      actuators.accel = float(brake_test_accel)
+      if self.volvo_brake_test.mode == VolvoBrakeTestMode.stop:
+        actuators.longControlState = car.CarControl.Actuators.LongControlState.stopping
+      self.LoC.reset()
+      self.LoC.last_output_accel = brake_test_accel
+
+    if self.volvo_brake_test.resume_active:
+      # Existing Volvo SNG logic requires longActive false while the explicit
+      # resume flag is sent. Yield briefly, then restore OP long once moving.
+      CC.longActive = False
+      actuators.accel = 0.0
+      self.LoC.reset()
+      self.LoC.last_output_accel = 0.0
+
     # Steering PID loop and lateral MPC
     # Reset desired curvature to current to avoid violating the limits on engage
     if self.sm.valid['lateralManeuverPlan']:
@@ -172,7 +240,11 @@ class Controls(ControlsExt):
 
     CC.cruiseControl.override = CC.enabled and not CC.longActive and (self.CP.openpilotLongitudinalControl or not self.CP_SP.pcmCruiseSpeed)
     CC.cruiseControl.cancel = CS.cruiseState.enabled and (not CC.enabled or not self.CP.pcmCruise)
-    CC.cruiseControl.resume = CC.enabled and CS.cruiseState.standstill and not self.sm['longitudinalPlan'].shouldStop
+    CC.cruiseControl.cancel = CC.cruiseControl.cancel or self.volvo_brake_test.cancel_cruise
+    volvo_stop_test_used = self.volvo_brake_test.mode == VolvoBrakeTestMode.stop
+    CC.cruiseControl.resume = (self.volvo_brake_test.resume_active or
+                               (CC.enabled and CS.cruiseState.standstill and
+                                not self.sm['longitudinalPlan'].shouldStop and not volvo_stop_test_used))
 
     hudControl = CC.hudControl
     hudControl.setSpeed = float(CS.vCruiseCluster * CV.KPH_TO_MS)
@@ -230,6 +302,44 @@ class Controls(ControlsExt):
     cc_send.valid = CS.canValid
     cc_send.carControl = CC
     self.pm.send('carControl', cc_send)
+
+    # Publish a small, low-rate diagnostic snapshot for the local brake-test
+    # page. The web process must never subscribe to the high-rate control
+    # streams directly: doing so can disturb messaging timing on the device.
+    if self.sm.frame % 50 == 0:
+      armed = (self.CP.brand == "volvo" and self.CP.openpilotLongitudinalControl and
+               os.path.exists("/data/volvo_brake_test_armed"))
+      pedals_clear = not CS.gasPressed and not CS.brakePressed
+      no_lead = not self.sm['longitudinalPlan'].hasLead
+      speed_kph = abs(CS.vEgo) * CV.MS_TO_KPH
+      ready = (armed and not self.volvo_brake_test.used and
+               self.sm['selfdriveState'].active and CC.longActive and CS.cruiseState.enabled and
+               0.0 < CS.vCruise < 250.0 and pedals_clear and no_lead and
+               self.volvo_brake_test.config.min_speed * CV.MS_TO_KPH <= speed_kph <=
+               self.volvo_brake_test.config.max_speed * CV.MS_TO_KPH)
+      resume_ready = (armed and self.volvo_brake_test.active and
+                      self.volvo_brake_test.mode == VolvoBrakeTestMode.stop and self.volvo_brake_test.stop_reached and
+                      not self.volvo_brake_test.resume_active and CS.standstill and
+                      self.sm['selfdriveState'].active and CC.longActive and CS.cruiseState.enabled and
+                      pedals_clear and no_lead)
+
+      status = messaging.new_message('volvoBrakeTestStateSP')
+      status.valid = CS.canValid
+      state = status.volvoBrakeTestStateSP
+      state.armed = armed
+      state.enabled = self.sm['selfdriveState'].enabled
+      state.active = self.sm['selfdriveState'].active
+      state.longActive = CC.longActive
+      state.noLead = no_lead
+      state.pedalsClear = pedals_clear
+      state.speedKph = speed_kph
+      state.ready = ready
+      state.standstill = CS.standstill
+      state.resumeReady = resume_ready
+      state.virtualLeadSimulated = self.sm['carStateSP'].volvoVirtualLeadSimulated
+      state.virtualLeadAccepted = self.sm['carStateSP'].volvoVirtualLeadAccepted
+      state.used = self.volvo_brake_test.used
+      self.pm.send('volvoBrakeTestStateSP', status)
 
   def run(self):
     rk = Ratekeeper(100, print_delay_threshold=None)

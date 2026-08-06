@@ -14,6 +14,14 @@ from openpilot.sunnypilot.models.helpers import get_active_model_runner
 from openpilot.sunnypilot.sunnylink.utils import sunnylink_need_register, sunnylink_ready, use_sunnylink_uploader
 
 WEBCAM = os.getenv("USE_WEBCAM") is not None
+VOLVO_BRAKE_TEST_ARM_FILE = "/data/volvo_brake_test_armed"
+volvo_brake_test_was_onroad = False
+
+# Arming is deliberately ephemeral and must never survive a manager restart.
+try:
+  os.remove(VOLVO_BRAKE_TEST_ARM_FILE)
+except FileNotFoundError:
+  pass
 
 def driverview(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started or params.get_bool("IsDriverViewEnabled")
@@ -42,6 +50,22 @@ def joystick(started: bool, params: Params, CP: car.CarParams) -> bool:
 
 def not_joystick(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and not params.get_bool("JoystickDebugMode")
+
+def volvo_brake_test(started: bool, params: Params, CP: car.CarParams) -> bool:
+  global volvo_brake_test_was_onroad
+  if started:
+    volvo_brake_test_was_onroad = True
+  elif volvo_brake_test_was_onroad:
+    try:
+      os.remove(VOLVO_BRAKE_TEST_ARM_FILE)
+    except FileNotFoundError:
+      pass
+    volvo_brake_test_was_onroad = False
+
+  # carParams can be empty while offroad, so live vehicle gating belongs in
+  # controlsd/web readiness. Without a Volvo, this process can only publish an
+  # ignored testJoystick message.
+  return os.path.exists(VOLVO_BRAKE_TEST_ARM_FILE) and not params.get_bool("JoystickDebugMode")
 
 def long_maneuver(started: bool, params: Params, CP: car.CarParams) -> bool:
   return started and params.get_bool("LongitudinalManeuverMode")
@@ -159,6 +183,7 @@ procs = [
   PythonProcess("webrtcd", "system.webrtc.webrtcd", notcar),
   PythonProcess("webjoystick", "tools.bodyteleop.web", notcar),
   PythonProcess("joystick", "tools.joystick.joystick_control", and_(joystick, iscar)),
+  PythonProcess("volvo_brake_test_web", "tools.volvo_brake_test.web", volvo_brake_test),
 
   # sunnylink <3
   DaemonProcess("manage_sunnylinkd", "sunnypilot.sunnylink.athena.manage_sunnylinkd", "SunnylinkdPid"),

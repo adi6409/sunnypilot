@@ -20,6 +20,7 @@ from opendbc.car.interfaces import CarInterfaceBase, RadarInterfaceBase
 from openpilot.selfdrive.pandad import can_capnp_to_list, can_list_to_can_capnp
 from openpilot.selfdrive.car.cruise import VCruiseHelper
 from openpilot.selfdrive.car.helpers import convert_carControlSP, convert_to_capnp
+from openpilot.selfdrive.car.volvo_virtual_lead import VolvoVirtualLeadMonitor
 
 from openpilot.sunnypilot.mads.helpers import set_alternative_experience, set_car_specific_params
 from openpilot.sunnypilot.selfdrive.car import interfaces as sunnypilot_interfaces
@@ -74,6 +75,7 @@ class Car:
     self.pm = messaging.PubMaster(['sendcan', 'carState', 'carParams', 'carOutput', 'liveTracks'] + ['carParamsSP', 'carStateSP'])
 
     self.can_rcv_cum_timeout_counter = 0
+    self.volvo_virtual_lead = VolvoVirtualLeadMonitor()
 
     self.CC_prev = car.CarControl.new_message()
     self.CS_prev = car.CarState.new_message()
@@ -193,10 +195,17 @@ class Car:
 
     can_strs = messaging.drain_sock_raw(self.can_sock, wait_for_one=True)
     can_list = can_capnp_to_list(can_strs)
+    now = time.monotonic()
+    if self.CP.brand == "volvo":
+      self.volvo_virtual_lead.observe_rx(can_list, now)
 
     # Update carState from CAN
     CS, CS_SP = self.CI.update(can_list)
     CS_SP = convert_to_capnp(CS_SP)
+    if self.CP.brand == "volvo":
+      virtual_lead_simulated, virtual_lead_accepted = self.volvo_virtual_lead.state(now)
+      CS_SP.volvoVirtualLeadSimulated = virtual_lead_simulated
+      CS_SP.volvoVirtualLeadAccepted = virtual_lead_accepted
 
     # Update radar tracks from CAN
     RD: structs.RadarDataT | None = self.RI.update(can_list)
@@ -280,6 +289,8 @@ class Car:
       # send car controls over can
       now_nanos = self.can_log_mono_time if REPLAY else int(time.monotonic() * 1e9)
       self.last_actuators_output, can_sends = self.CI.apply(CC, convert_carControlSP(CC_SP), now_nanos)
+      if self.CP.brand == "volvo":
+        self.volvo_virtual_lead.observe_tx(can_sends, now_nanos * 1e-9, CC_SP.leadOne.status)
       self.pm.send('sendcan', can_list_to_can_capnp(can_sends, msgtype='sendcan', valid=CS.canValid))
 
       self.CC_prev = CC
